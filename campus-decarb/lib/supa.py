@@ -1,24 +1,28 @@
 import json
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
 from lib.client import client
 from pydantic import BaseModel, Field, model_validator, validate_call
 
+BuildingUsage = Literal['Lab & Mixed Use', 'Office & Mixed Use', 'Lab Dominant', 'Mechanical', 'Support Areas & Parking', 'Residential', 'Special', 'Office']
+BuildingGroupLevel1 = Literal['CUP', 'Non-CUP', 'Leased Buildings', 'FSILGs', 'Off Campus Buildings']
 
 class BuildingBase(BaseModel, extra="forbid"):
     name: str = Field(..., description="Name of the building")
-    gfa: float = Field(..., gt=100, description="Gross Floor Area of the building, m2")
+    gfa: Optional[float] = Field(..., ge=0, description="Gross Floor Area of the building, m2")
+    building_number: Optional[str] = Field(None, description="MIT Building number")
+    usage: Optional[BuildingUsage] = Field(None, description="Building usage")
+    group_level_1: Optional[BuildingGroupLevel1] = Field(None, description="Non-CUP, CUP, etc")
+    height: Optional[float] = Field(None, description="Height of the building, m")
+    year: Optional[int] = Field(None, description="Year of construction")
 
 
 class Building(BuildingBase):
     id: int = Field(..., description="Unique identifier for the building")
-    created_at: str = Field(
-        ..., description="Timestamp of the creation of the building"
-    )
 
     @classmethod
     def get(cls, id: int):
@@ -31,7 +35,7 @@ class Building(BuildingBase):
     @classmethod
     @validate_call()
     def create(cls, building: BuildingBase):
-        building = client.table("Building").insert(building.model_dump()).execute()
+        building = client.table("Building").upsert(building.model_dump()).execute()
         return cls(**building.data[0])
 
     def commit(self):
@@ -40,9 +44,6 @@ class Building(BuildingBase):
 
 class BuildingSimulationResult(BaseModel, arbitrary_types_allowed=True, extra="forbid"):
     id: int
-    created_at: Optional[str] = Field(
-        None, description="Timestamp of the creation of the record"
-    )
     heating: np.ndarray
     cooling: np.ndarray
     lighting: np.ndarray
@@ -151,5 +152,30 @@ class BuildingSimulationResult(BaseModel, arbitrary_types_allowed=True, extra="f
 
     def commit(self):
         client.table("BuildingSimulationResult").upsert(
-            self.model_dump(mode="json", exclude=["created_at"])
+            self.model_dump(mode="json")
         ).execute()
+
+
+if __name__ == "__main__":
+    import math
+
+    import numpy as np
+
+    # TODO:
+    # add in better area breakdowns
+    # add in metering types etc
+    df = pd.read_csv("data/mit_buildings_info.csv")
+    for i, row in df.iterrows():
+        building = BuildingBase(
+            name=row["BUILDING_NAME_LONG"],
+            building_number=row["BUILDING_NUMBER"],
+            group_level_1=row["BUILDING_GROUP_LEVEL1"],
+            usage=row["CLUSTER_NUM"],
+            gfa=(
+                row["EXT_GROSS_AREA"] if not math.isnan(row["EXT_GROSS_AREA"]) else None
+            ),
+            height=(row["BUILDING_HEIGHT"] if not math.isnan(row["BUILDING_HEIGHT"]) else None),
+            year=row["YEAR_CONST_BEGAN"] if not math.isnan(row["YEAR_CONST_BEGAN"]) else None,
+
+        )
+        Building.create(building)
