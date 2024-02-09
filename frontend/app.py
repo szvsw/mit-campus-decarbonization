@@ -1,3 +1,16 @@
+import logging
+import sys
+
+logger = logging.getLogger(__name__)
+logging.basicConfig()
+logger.setLevel(logging.INFO)
+
+try:
+    from frontend import frontend_settings
+except:
+    print("appending path...")
+    logger.info("appending path...")
+    sys.path.append("/mount/src/mit-campus-decarbonization")
 import json
 import os
 
