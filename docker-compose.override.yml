@@ -1,0 +1,6 @@
+version: '3.4'
+services:
+  frontend:
+    volumes:
+      - ./frontend:/app/frontend
+      - ./lib:/app/lib

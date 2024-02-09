@@ -1,0 +1,10 @@
+version: '3.4'
+services:
+  frontend: # offloads api callbacks to a scalable service
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"

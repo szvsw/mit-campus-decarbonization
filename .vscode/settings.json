@@ -7,16 +7,6 @@
     }
   },
   "isort.args": ["--profile", "black"],
-  "terminal.integrated.env.linux": {
-    "PYTHONPATH": "${workspaceFolder}/campus-decarb"
-  },
-  "terminal.integrated.env.osx": {
-    "PYTHONPATH": "${workspaceFolder}/campus-decarb"
-  },
-  "terminal.integrated.env.windows": {
-    "PYTHONPATH": "${workspaceFolder}/campus-decarb"
-  },
-  "python.analysis.extraPaths": ["campus-decarb"],
-  "jupyter.notebookFileRoot": "${workspaceFolder}/campus-decarb",
+  "jupyter.notebookFileRoot": "${workspaceFolder}",
   "python.envFile": "${workspaceFolder}/.env"
 }
