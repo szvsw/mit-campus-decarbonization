@@ -1,3 +1,9 @@
+import sys
+
+try:
+    from frontend import frontend_settings
+except:
+    sys.path.append("..")
 import json
 import os
 
