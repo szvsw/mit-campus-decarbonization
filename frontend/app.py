@@ -4,10 +4,19 @@ import os
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from sqlmodel import Session, select
 
 from frontend import frontend_settings as settings
 from lib.client import client
-from lib.supa import Building
+from lib.models import (
+    Building,
+    BuildingSimulationResult,
+    DemandScenario,
+    DemandScenarioBuilding,
+    engine,
+)
+
+# from lib.supa import Building
 
 st.set_page_config(layout="wide", page_title="MIT Decarbonization")
 
@@ -23,6 +32,16 @@ def get_all_buildings():
 
 
 @st.cache_data
+def get_all_buildings_v2():
+    with Session(engine) as session:
+        stmt = select(Building)
+        buildings = session.exec(stmt).all()
+        df = pd.DataFrame([b.model_dump() for b in buildings]).set_index("id")
+        csv = df.to_csv().encode()
+    return df, csv
+
+
+@st.cache_data
 def get_building_scenarios(building_id: int):
     ids = (
         client.table("DemandScenarioBuilding")
@@ -33,12 +52,35 @@ def get_building_scenarios(building_id: int):
     )
     scenario_ids = [d["demand_scenario_id"] for d in ids]
     results_ids = [d["id"] for d in ids]
+
+    return scenario_ids, results_ids
+
+
+@st.cache_data
+def get_building_scenarios_v2(building_id: int):
+    with Session(engine) as session:
+        stmt = select(DemandScenarioBuilding).where(
+            DemandScenarioBuilding.building_id == building_id
+        )
+        scenarios = session.exec(stmt).all()
+        scenario_ids = [s.demand_scenario_id for s in scenarios]
+        results_ids = [s.id for s in scenarios]
+
     return scenario_ids, results_ids
 
 
 @st.cache_data
 def get_scenarios():
     return client.table("DemandScenario").select("*").execute().data
+
+
+def create_demand_scenario(name: str):
+    with Session(engine) as session:
+        scenario = DemandScenario(name=name)
+        session.add(scenario)
+        session.commit()
+        st.cache_data.clear()
+        st.experimental_rerun()
 
 
 @st.cache_data
@@ -135,7 +177,7 @@ def render_title():
 
 
 def render_buildings():
-    all_buildings, all_buildings_csv = get_all_buildings()
+    all_buildings_df, all_buildings_csv = get_all_buildings_v2()
     st.download_button(
         "Download all building metadata",
         all_buildings_csv,
@@ -146,11 +188,11 @@ def render_buildings():
     )
     building_id = st.selectbox(
         "Building",
-        all_buildings.index,
-        format_func=lambda x: all_buildings.loc[x, "name"],
+        all_buildings_df.index,
+        format_func=lambda x: all_buildings_df.loc[x, "name"],
         help="Select a building to view its data",
     )
-    building = all_buildings.loc[building_id]
+    building = all_buildings_df.loc[building_id]
     scenario_ids, results_ids = get_building_scenarios(building_id)
     all_scenarios = get_scenarios()
     filtered_scenarios = [s for s in all_scenarios if s["id"] in scenario_ids]
@@ -216,6 +258,11 @@ def render_building_scenarios():
         color_discrete_map=ENDUSE_PASTEL_COLORS,
     )
     st.plotly_chart(fig, use_container_width=True)
+    st.divider()
+    st.markdown("### Create a new demand scenario")
+    name = st.text_input("Name")
+    if st.button("Create", disabled=name == ""):
+        create_demand_scenario(name)
 
 
 def password_protect():
@@ -226,7 +273,10 @@ def password_protect():
     else:
         password = st.text_input("Password", type="password")
         st.session_state.password = password
-        return st.session_state.password == settings.password
+        result = st.session_state.password == settings.password
+        if result:
+            st.experimental_rerun()
+        return result
 
 
 render_title()

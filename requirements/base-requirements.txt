@@ -2,3 +2,6 @@ pydantic
 pydantic_settings
 pandera
 supabase
+psycopg2-binary
+pgvector
+sqlmodel
