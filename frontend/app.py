@@ -3,6 +3,7 @@ import sys
 try:
     from frontend import frontend_settings
 except:
+    print("appending path...")
     sys.path.append("..")
 import json
 import os
