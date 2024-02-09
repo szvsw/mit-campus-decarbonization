@@ -119,6 +119,8 @@ def get_scenario_results(scenario_id: int):
         df["result_id"] = result["id"]
         df = df.set_index("result_id", append=True)
         dfs.append(df)
+    if len(dfs) == 0:
+        return None, None, None
     df_buildings = pd.concat(dfs)
     df = df_buildings.groupby("Timestamp").sum()
     df.columns = [x.capitalize() for x in df.columns]
@@ -221,6 +223,11 @@ def render_buildings():
         st.dataframe(building)
 
 
+@st.cache_data
+def encode_csv(df: pd.DataFrame) -> str:
+    return df.to_csv().encode()
+
+
 def render_building_scenarios():
     all_scenarios = get_scenarios()
     scenario = st.selectbox(
@@ -230,11 +237,16 @@ def render_building_scenarios():
         help="Select a demand scenario to view its data",
     )
     df, df_melted, df_buildings = get_scenario_results(scenario["id"])
+    if df is None:
+        st.warning("No results found for this scenario!")
+        render_create_scenario()
+        return
+
     l, r = st.columns(2)
     with l:
         st.download_button(
             "Download scenario results",
-            df.to_csv().encode(),
+            encode_csv(df),
             f"{scenario['name']}_results.csv",
             "Download scenario results",
             use_container_width=True,
@@ -243,7 +255,7 @@ def render_building_scenarios():
     with r:
         st.download_button(
             "Download scenario buildings results",
-            df_buildings.to_csv().encode(),
+            encode_csv(df_buildings),
             f"{scenario['name']}_buildings_results.csv",
             "Download scenario buildings results",
             use_container_width=True,
@@ -258,6 +270,10 @@ def render_building_scenarios():
         color_discrete_map=ENDUSE_PASTEL_COLORS,
     )
     st.plotly_chart(fig, use_container_width=True)
+    render_create_scenario()
+
+
+def render_create_scenario():
     st.divider()
     st.markdown("### Create a new demand scenario")
     name = st.text_input("Name")
@@ -266,6 +282,8 @@ def render_building_scenarios():
 
 
 def password_protect():
+    if settings.env == "dev":
+        return True
     if "password" not in st.session_state:
         st.session_state.password = None
     if st.session_state.password == settings.password:
