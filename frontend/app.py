@@ -10,7 +10,7 @@ try:
 except:
     print("appending path...")
     logger.info("appending path...")
-    sys.path.append("..")
+    sys.path.append("/mount/src/mit-campus-decarbonization")
 import json
 import os
 
