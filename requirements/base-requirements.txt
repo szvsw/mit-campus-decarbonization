@@ -5,3 +5,4 @@ supabase
 psycopg2-binary
 pgvector
 sqlmodel
+tables

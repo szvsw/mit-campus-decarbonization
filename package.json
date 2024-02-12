@@ -1,5 +1,13 @@
 {
   "devDependencies": {
     "supabase": "^1.142.2"
+  },
+  "scripts": {
+    "conda-setup": "conda env create -f environment.yml",
+    "conda-update": "conda env update -f environment.yml",
+    "db-reset": "npx supabase db reset",
+    "db-seed": "conda activate mit-campus-decarbonization && python data/seed.py",
+    "db-refresh": "npm run reset-db && npm run db-refresh",
+    "fe-start": "conda activate mit-campus-decarbonization && streamlit run frontend/app.py"
   }
 }
