@@ -1,3 +1,4 @@
+create extension if not exists "vector" with schema "extensions";
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;

@@ -86,6 +86,8 @@ class DemandScenario(SQLModel, table=True):
     Attributes:
         id (Optional[int]): The ID of the demand scenario.
         name (str): The name of the demand scenario.
+        description (Optional[str]): The description of the demand scenario.
+        year_available (Optional[int]): The year the demand scenario is available.
         buildings (list[Building]): The list of buildings associated with the demand scenario.
         demand_scenario_designs (list[DemandScenarioBuilding]): The list of demand scenario designs associated with the demand scenario.
     """
@@ -93,6 +95,12 @@ class DemandScenario(SQLModel, table=True):
     __tablename__ = "DemandScenario"
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(..., description="Name of the demand scenario")
+    description: Optional[str] = Field(
+        None, description="Description of the demand scenario"
+    )
+    year_available: Optional[int] = Field(
+        ..., description="Year the demand scenario is available"
+    )
     buildings: list["Building"] = Relationship(
         back_populates="demand_scenarios", link_model=DemandScenarioBuilding
     )
@@ -181,9 +189,25 @@ class BuildingSimulationResult(SQLModel, table=True):
 
 
 class PowerPlant(SQLModel, table=True):
+    """
+    Represents a power plant in the decarbonization model.
+
+    Attributes:
+        id (Optional[int]): The ID of the power plant.
+        name (str): The name of the power plant.
+        description (Optional[str]): The description of the power plant.
+        nominal_capacity (Optional[float]): The nominal capacity of the power plant in kW.
+        nominal_cost (Optional[float]): The nominal cost of the power plant in $/kWh.
+        nominal_emissions_factor (Optional[float]): The nominal emissions factor of the power plant in kgCO2/kWh.
+        power_plant_scenarios (list[PowerPlantScenario]): The list of power plant scenarios associated with the power plant.
+    """
+
     __tablename__ = "PowerPlant"
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(..., description="Name of the power plant")
+    description: Optional[str] = Field(
+        None, description="Description of the power plant"
+    )
     nominal_capacity: Optional[float] = Field(
         None, description="Nominal capacity of the power plant [kW]"
     )
@@ -199,11 +223,32 @@ class PowerPlant(SQLModel, table=True):
 
 
 class PowerPlantScenario(SQLModel, table=True):
+    """
+    Represents a power plant scenario in the decarbonization model.
+
+    Attributes:
+        id (Optional[int]): The ID of the power plant scenario.
+        power_plant_id (int): The ID of the associated power plant.
+        power_plant (PowerPlant): The associated power plant.
+        name (str): The name of the power plant scenario.
+        description (Optional[str]): The description of the power plant scenario.
+        year_available (Optional[int]): The year the power plant scenario is available.
+        emissions_factors (Optional[np.ndarray]): The emissions factors for the power plant scenario.
+        cost_factors (Optional[np.ndarray]): The cost factors for the power plant scenario.
+        capacities (Optional[np.ndarray]): The capacities for the power plant scenario.
+    """
+
     __tablename__ = "PowerPlantScenario"
     id: Optional[int] = Field(default=None, primary_key=True)
     power_plant_id: int = Field(..., foreign_key="PowerPlant.id")
     power_plant: PowerPlant = Relationship(back_populates="power_plant_scenarios")
     name: str = Field(..., description="Name of the power plant scenario")
+    description: Optional[str] = Field(
+        None, description="Description of the power plant scenario"
+    )
+    year_available: Optional[int] = Field(
+        ..., description="Year the power plant scenario is available"
+    )
     emissions_factors: np.ndarray = Field(None, sa_column=Column(Vector(8760)))
     cost_factors: np.ndarray = Field(None, sa_column=Column(Vector(8760)))
     capacities: np.ndarray = Field(None, sa_column=Column(Vector(8760)))

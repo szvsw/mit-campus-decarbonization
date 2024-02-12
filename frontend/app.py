@@ -1,5 +1,6 @@
 import logging
 import sys
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 logging.basicConfig()
@@ -94,7 +95,31 @@ def create_demand_scenario(name: str):
         session.add(scenario)
         session.commit()
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.rerun()
+
+
+def create_power_plant(name: str):
+    with Session(engine) as session:
+        scenario = PowerPlant(name=name)
+        session.add(scenario)
+        session.commit()
+        get_power_plants.clear()
+        st.rerun()
+
+
+def create_power_plant_scenario(name: str, power_plant_id: int, df: pd.DataFrame):
+    with Session(engine) as session:
+        scenario = PowerPlantScenario(
+            name=name,
+            power_plant_id=power_plant_id,
+            emissions_factors=df["emissions_factors"].values,
+            cost_factors=df["cost_factors"].values,
+            capacities=df["capacities"].values,
+        )
+        session.add(scenario)
+        session.commit()
+        get_power_plant_scenarios.clear()
+        st.rerun()
 
 
 @st.cache_data
@@ -275,7 +300,7 @@ def render_building_scenarios():
     df, df_melted, df_buildings = get_scenario_results(scenario["id"])
     if df is None:
         st.warning("No results found for this scenario!")
-        render_create_scenario()
+        render_create_demand_scenario()
         return
 
     l, r = st.columns(2)
@@ -306,69 +331,175 @@ def render_building_scenarios():
         color_discrete_map=ENDUSE_PASTEL_COLORS,
     )
     st.plotly_chart(fig, use_container_width=True)
-    render_create_scenario()
+    render_create_demand_scenario()
 
 
-def render_create_scenario():
+def render_create_demand_scenario():
     st.divider()
     st.markdown("### Create a new demand scenario")
-    name = st.text_input("Name")
-    if st.button("Create", disabled=name == ""):
+    name = st.text_input(
+        "Name", key="create_demand_scenario_name", help="Name of the scenario"
+    )
+    if st.button("Create", disabled=name == "", key="create_demand_scenario_button"):
         create_demand_scenario(name)
 
 
+def render_create_power_plant():
+    st.divider()
+    st.markdown("### New Power Plant")
+    st.markdown("Create a new power plant type.")
+    name = st.text_input(
+        "Name", key="create_power_plant_name", help="Name of the power plant type"
+    )
+    if st.button(
+        "Create",
+        disabled=name == "",
+        key="create_power_plant_button",
+        type="primary",
+        use_container_width=True,
+    ):
+        create_power_plant(name)
+
+
+# TODO: use pandera, import UploadedFile type annotation
+@st.cache_data
+def validate_power_plant_scenario_csv(csv_file) -> Optional[pd.DataFrame]:
+    try:
+        df = pd.read_csv(csv_file)
+        # assert "Timestamp" in df.columns
+        assert "capacities" in df.columns
+        assert "emissions_factors" in df.columns
+        assert "cost_factors" in df.columns
+        assert len(df) == 8760
+        assert df["capacities"].dtype in [int, float]
+        assert df["emissions_factors"].dtype in [int, float]
+        assert df["cost_factors"].dtype in [int, float]
+        # assert df["Timestamp"].dtype == "datetime64[ns]"
+        return df
+    except Exception as e:
+        return None
+
+
+def render_create_power_plant_scenario(pp: PowerPlant):
+    st.divider()
+    st.markdown("### New Power Plant Scenario")
+    st.markdown(f"Create a new scenario for `{pp.name}` power plant type")
+    name = st.text_input(
+        "Name", key="create_power_plant_scenario_name", help="Name of the scenario"
+    )
+    csv_file = st.file_uploader(
+        "Upload a CSV file with the scenario data",
+        type=["csv"],
+        accept_multiple_files=False,
+        key="upload_power_plant_scenario_data",
+    )
+    df = None
+    if csv_file:
+        df = validate_power_plant_scenario_csv(csv_file)
+        if df is None:
+            st.error(
+                "Invalid CSV file. Please check the file format and try again.  The CSV must have three columns: 'capacities', 'emissions_factors', and 'cost_factors' and 8760 rows."
+            )
+
+    disabled = name == "" or df is None
+    if st.button(
+        "Create",
+        disabled=disabled,
+        key="create_power_plant_scenario_button",
+        use_container_width=True,
+        type="primary",
+    ):
+        create_power_plant_scenario(name, pp.id, df)
+
+
 def render_power_plants():
+    l, r = st.columns(2)
+    chart_container = st.container()
+    create_plant_container, create_plant_scenario_container = st.columns(2)
+
+    with create_plant_container:
+        render_create_power_plant()
+
+    # get the power plants
     power_plants = [PowerPlant.model_validate(p) for p in get_power_plants()]
+
+    # early return if no power plants
     if len(power_plants) == 0:
         st.warning("No power plants found!")
         return
-    pp = st.selectbox(
-        "Power Plant",
-        power_plants,
-        format_func=lambda x: x.name,
-        help="Select a power plant to view its data",
-    )
+
+    # select a plant
+    with l:
+        pp = st.selectbox(
+            "Power Plant",
+            power_plants,
+            format_func=lambda x: x.name,
+            help="Select a power plant to view its data",
+        )
+
+    with create_plant_scenario_container:
+        render_create_power_plant_scenario(pp)
+
+    # get scenarios
     pp_scenarios = [
         (PowerPlantScenario.model_validate(p))
         for p, df in get_power_plant_scenarios(pp.id)
     ]
+
+    # early return if no scenarios
     if len(pp_scenarios) == 0:
-        st.warning("No scenarios found for this power plant!")
+        with r:
+            st.warning("No scenarios found for this power plant!")
         return
+
+    # create a combined dataframe of all scenarios
     pp_scenarios_dfs = [df for p, df in get_power_plant_scenarios(pp.id)]
     stacked_scenarios = pd.concat(pp_scenarios_dfs, axis=0)
-    st.download_button(
-        f"Download {pp.name} power plant scenarios",
-        encode_csv(stacked_scenarios),
-        f"{pp.name}_scenarios.csv",
-        "Download all scenarios for power plant type.",
-        use_container_width=True,
-        type="primary",
-    )
-    s = st.selectbox(
-        "Power Plant Scenario",
-        list(range(len(pp_scenarios))),
-        format_func=lambda x: pp_scenarios[x].name,
-        help="Select a power plant scenario to view its data",
-    )
+
+    # downloader for all scenarios
+    with l:
+        st.download_button(
+            f"Download {pp.name} power plant scenarios",
+            encode_csv(stacked_scenarios),
+            f"{pp.name}_scenarios.csv",
+            "Download all scenarios for power plant type.",
+            use_container_width=True,
+            type="primary",
+        )
+
+    # selector for single scenario
+    with r:
+        s = st.selectbox(
+            "Power Plant Scenario",
+            list(range(len(pp_scenarios))),
+            format_func=lambda x: pp_scenarios[x].name,
+            help="Select a power plant scenario to view its data",
+        )
+
+    # select scenario data
     scenario_df = pp_scenarios_dfs[s]
     scenario = pp_scenarios[s]
-    st.download_button(
-        f"Download {pp.name} {scenario.name} scenario",
-        encode_csv(scenario_df),
-        f"{pp.name}_{scenario.name}_scenario.csv",
-        "Download scenario data",
-        use_container_width=True,
-        type="primary",
-    )
-    fig = px.line(
-        scenario_df.reset_index(),
-        x="Timestamp",
-        y="capacities",
-        title=f"{pp.name} {scenario.name} Scenario",
-        labels={"capacities": "Capacity [kW]"},
-    )
-    st.plotly_chart(fig, use_container_width=True)
+
+    # downloader for single scenario
+    with r:
+        st.download_button(
+            f"Download {pp.name} {scenario.name} scenario",
+            encode_csv(scenario_df),
+            f"{pp.name}_{scenario.name}_scenario.csv",
+            "Download scenario data",
+            use_container_width=True,
+            type="primary",
+        )
+
+    with chart_container:
+        fig = px.line(
+            scenario_df.reset_index(),
+            x="Timestamp",
+            y="capacities",
+            title=f"{pp.name} {scenario.name} Scenario",
+            labels={"capacities": "Capacity [kW]"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def password_protect():
