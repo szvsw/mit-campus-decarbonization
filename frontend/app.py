@@ -17,6 +17,7 @@ import os
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
 from frontend import frontend_settings as settings
@@ -26,10 +27,10 @@ from lib.models import (
     BuildingSimulationResult,
     DemandScenario,
     DemandScenarioBuilding,
+    PowerPlant,
+    PowerPlantScenario,
     engine,
 )
-
-# from lib.supa import Building
 
 st.set_page_config(layout="wide", page_title="MIT Decarbonization")
 
@@ -179,6 +180,28 @@ def get_scenario_building_result(scenario_id: int, building_id: int):
     return df, df_melted
 
 
+@st.cache_data
+def get_power_plants() -> list[PowerPlant]:
+    with Session(engine) as session:
+        stmt = select(PowerPlant).options(
+            selectinload(PowerPlant.power_plant_scenarios)
+        )
+        power_plants = session.exec(stmt).all()
+
+        return [(p.model_dump()) for p in power_plants]
+
+
+@st.cache_data
+def get_power_plant_scenarios(power_plant_id: int) -> list[PowerPlantScenario]:
+    with Session(engine) as session:
+        stmt = select(PowerPlantScenario).where(
+            PowerPlantScenario.power_plant_id == power_plant_id
+        )
+        power_plant_scenarios = session.exec(stmt).all()
+
+        return [(p.model_dump(), p.to_df()) for p in power_plant_scenarios]
+
+
 ENDUSE_PASTEL_COLORS = {
     "Heating": "#FF7671",
     "Cooling": "#6D68E6",
@@ -294,6 +317,60 @@ def render_create_scenario():
         create_demand_scenario(name)
 
 
+def render_power_plants():
+    power_plants = [PowerPlant.model_validate(p) for p in get_power_plants()]
+    if len(power_plants) == 0:
+        st.warning("No power plants found!")
+        return
+    pp = st.selectbox(
+        "Power Plant",
+        power_plants,
+        format_func=lambda x: x.name,
+        help="Select a power plant to view its data",
+    )
+    pp_scenarios = [
+        (PowerPlantScenario.model_validate(p))
+        for p, df in get_power_plant_scenarios(pp.id)
+    ]
+    if len(pp_scenarios) == 0:
+        st.warning("No scenarios found for this power plant!")
+        return
+    pp_scenarios_dfs = [df for p, df in get_power_plant_scenarios(pp.id)]
+    stacked_scenarios = pd.concat(pp_scenarios_dfs, axis=0)
+    st.download_button(
+        f"Download {pp.name} power plant scenarios",
+        encode_csv(stacked_scenarios),
+        f"{pp.name}_scenarios.csv",
+        "Download all scenarios for power plant type.",
+        use_container_width=True,
+        type="primary",
+    )
+    s = st.selectbox(
+        "Power Plant Scenario",
+        list(range(len(pp_scenarios))),
+        format_func=lambda x: pp_scenarios[x].name,
+        help="Select a power plant scenario to view its data",
+    )
+    scenario_df = pp_scenarios_dfs[s]
+    scenario = pp_scenarios[s]
+    st.download_button(
+        f"Download {pp.name} {scenario.name} scenario",
+        encode_csv(scenario_df),
+        f"{pp.name}_{scenario.name}_scenario.csv",
+        "Download scenario data",
+        use_container_width=True,
+        type="primary",
+    )
+    fig = px.line(
+        scenario_df.reset_index(),
+        x="Timestamp",
+        y="capacities",
+        title=f"{pp.name} {scenario.name} Scenario",
+        labels={"capacities": "Capacity [kW]"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def password_protect():
     if settings.env == "dev":
         return True
@@ -313,8 +390,12 @@ def password_protect():
 render_title()
 logged_in = password_protect()
 if logged_in:
-    buildings_tab, scenarios_tab = st.tabs(["Buildings", "Scenarios"])
+    buildings_tab, scenarios_tab, power_plants_tab = st.tabs(
+        ["Buildings", "Scenarios", "Power Plants"]
+    )
     with buildings_tab:
         render_buildings()
     with scenarios_tab:
         render_building_scenarios()
+    with power_plants_tab:
+        render_power_plants()

@@ -178,3 +178,58 @@ class BuildingSimulationResult(SQLModel, table=True):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+class PowerPlant(SQLModel, table=True):
+    __tablename__ = "PowerPlant"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(..., description="Name of the power plant")
+    nominal_capacity: Optional[float] = Field(
+        None, description="Nominal capacity of the power plant [kW]"
+    )
+    nominal_cost: Optional[float] = Field(
+        None, description="Nominal cost of the power plant [$/kWh]"
+    )
+    nominal_emissions_factor: Optional[float] = Field(
+        None, description="Nominal emissions factor of the power plant [kgCO2/kWh]"
+    )
+    power_plant_scenarios: list["PowerPlantScenario"] = Relationship(
+        back_populates="power_plant"
+    )
+
+
+class PowerPlantScenario(SQLModel, table=True):
+    __tablename__ = "PowerPlantScenario"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    power_plant_id: int = Field(..., foreign_key="PowerPlant.id")
+    power_plant: PowerPlant = Relationship(back_populates="power_plant_scenarios")
+    name: str = Field(..., description="Name of the power plant scenario")
+    emissions_factors: np.ndarray = Field(None, sa_column=Column(Vector(8760)))
+    cost_factors: np.ndarray = Field(None, sa_column=Column(Vector(8760)))
+    capacities: np.ndarray = Field(None, sa_column=Column(Vector(8760)))
+
+    def to_df(self) -> pd.DataFrame:
+        df = pd.DataFrame(
+            {
+                "emissions_factors": self.emissions_factors,
+                "cost_factors": self.cost_factors,
+                "capacities": self.capacities,
+            }
+        )
+        df.index = pd.date_range(start="1/1/2024", periods=8760, freq="h")
+        df.index.name = "Timestamp"
+        df = df.set_index(
+            pd.Series([self.power_plant.id] * 8760, name="power_plant_id"), append=True
+        )
+        df = df.set_index(
+            pd.Series([self.power_plant.name] * 8760, name="power_plant_name"),
+            append=True,
+        )
+        df = df.set_index(
+            pd.Series([self.name] * 8760, name="scenario_name"), append=True
+        )
+        df = df.set_index(pd.Series([self.id] * 8760, name="scenario_id"), append=True)
+        return df
+
+    class Config:
+        arbitrary_types_allowed = True
