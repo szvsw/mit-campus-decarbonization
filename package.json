@@ -5,9 +5,10 @@
   "scripts": {
     "conda-setup": "conda env create -f environment.yml",
     "conda-update": "conda env update -f environment.yml",
+    "supa-login": "npx supabase login && npx supabase link",
     "db-reset": "npx supabase db reset",
     "db-seed": "conda activate mit-campus-decarbonization && python data/seed.py",
-    "db-refresh": "npm run reset-db && npm run db-refresh",
+    "db-refresh": "npm run db-reset && npm run db-seed",
     "fe-start": "conda activate mit-campus-decarbonization && streamlit run frontend/app.py"
   }
 }
