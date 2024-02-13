@@ -1,8 +1,9 @@
 import os
 
+from supabase.client import ClientOptions
+
 from lib import supa_settings
 from supabase import create_client
-from supabase.client import ClientOptions
 
 client_options = ClientOptions(postgrest_client_timeout=60)
 client = create_client(
