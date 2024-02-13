@@ -5,8 +5,32 @@ Materials for MIT Campus Decarbonization Study
 
 ## Setup
 
-1. Install npm, conda (maybe docker)
-2. npm i
-3. npm run conda-setup
-4. npx supabase init (?? maybe) && npx supabase login && npx supabase link
-5. npm run db-refresh
+1. Install `npm`, `conda`, `docker`
+1. `cp .env.example .env`
+1. `npm i`
+1. `npm run conda-setup`
+1. `npm run supa-login` (you will need to login on the browser, then select the appropriate project)
+1. `npx supabase start`
+1. `npm run db-refresh`
+
+## Running the Data Warehouse
+
+First, reset the db to a clean state, applying all migrations present and then seeding with data.
+
+```sh
+npm run db-refresh
+```
+
+Start the streamlit frontend:
+
+```sh
+npm run fe-start
+```
+
+## Database Migration
+
+Database migration is managed with supabase.
+
+(coming soon)
+
+
