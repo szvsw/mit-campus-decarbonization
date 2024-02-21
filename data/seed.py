@@ -64,7 +64,12 @@ if __name__ == "__main__":
             raw_keys_lookup = {k.lower()[1:-3]: k for k in f.keys()}
 
         buildings = []
-        for i, row in tqdm(list(df.iterrows()), desc="Creating Building..."):
+        for i, row in tqdm(
+            list(df.iterrows()),
+            desc="Creating Building...",
+            position=1,
+            leave=False,
+        ):
             building = Building(
                 name=row["BUILDING_NAME_LONG"],
                 building_number=row["BUILDING_NUMBER"],
@@ -106,6 +111,8 @@ if __name__ == "__main__":
                 for ds in tqdm(
                     demand_scenarios,
                     desc="Creating results for building in scenario...",
+                    position=1,
+                    leave=False,
                 ):
                     factor = 1
                     climate_scenario_factors_heating = {
@@ -137,7 +144,7 @@ if __name__ == "__main__":
                     yf = (ds.year_available - 2025) / 25
                     assert yf <= 1.0
                     h_rand = (yf * chsf + (1 - yf) * 1) * sf * rf
-                    c_rand = (yf * ccsf + (1 - yf) * 1) * sf * rf 
+                    c_rand = (yf * ccsf + (1 - yf) * 1) * sf * rf
                     e_rand = sf * rf
                     l_rand = sf * rf
                     # h_rand = (np.random.rand() * 0.1 + 0.95) * f
@@ -156,7 +163,7 @@ if __name__ == "__main__":
                         lighting=(results_df.lighting.values * l_rand).tolist(),
                     )
                     session.add(bsr)
-                    session.commit()
+                session.commit()
             else:
                 print(
                     f"Could not find energy results for {building.name} ({building.building_number})"

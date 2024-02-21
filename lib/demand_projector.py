@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import taichi as ti
 from supabase.client import PostgrestAPIError
-from tqdm.auto import tqdm
 from tqdm.autonotebook import tqdm
 
 from lib.models import (
@@ -453,7 +452,8 @@ class DemandScenarioProjector:
         for n_upgrades_executed_per_year in tqdm(
             building_retrofit_rates,
             desc="Retrofit Rates",
-            position=0,
+            position=3,
+            leave=False,
         ):
             df = self.run_pass(
                 n_upgrades_executed_per_year=n_upgrades_executed_per_year,
@@ -490,7 +490,8 @@ class DemandScenarioProjector:
         for retrofit_name, retrofit_upgrade_ix in tqdm(
             retrofit_scenario_ixs,
             desc="Retrofit",
-            position=1,
+            position=2,
+            leave=False,
         ):
             df = self.run_retrofit_rates(
                 baseline_scenario_ix=baseline_scenario_ix,
@@ -537,7 +538,8 @@ class DemandScenarioProjector:
         for schedules_name, schedules_upgrade_ix in tqdm(
             retrofit_schedules_ixs,
             desc="Schedules",
-            position=2,
+            position=1,
+            leave=False,
         ):
             df = self.run_retrofit_scenarios(
                 weather_scenario_ix=weather_scenario_ix,
@@ -588,7 +590,8 @@ class DemandScenarioProjector:
         for weather_name, weather_scenario_ix in tqdm(
             weather_scenario_ixs,
             desc="Weather",
-            position=3,
+            position=0,
+            leave=False,
         ):
             df = self.run_schedules_scenarios(
                 weather_scenario_ix=weather_scenario_ix,
@@ -637,12 +640,12 @@ if __name__ == "__main__":
     import plotly.express as px
     import plotly.graph_objects as go
 
-    make_npy()
+    # make_npy()
 
     ti.init(arch=ti.cpu, default_fp=ti.f32)
 
     sim_manager = DemandScenarioProjector(
-        n_simulation_passes=10,
+        n_simulation_passes=100,
         n_weather_scenarios=4,
         n_years_per_eval=5,
         n_evals_per_building_scenario=6,
