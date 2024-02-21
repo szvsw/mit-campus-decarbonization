@@ -1,10 +1,11 @@
+import enum
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column
-from sqlmodel import Field, Relationship, SQLModel, create_engine
+from sqlmodel import Enum, Field, Relationship, SQLModel, create_engine
 
 from lib import supa_settings
 
@@ -21,8 +22,6 @@ class DemandScenarioBuilding(SQLModel, table=True):
         demand_scenario (DemandScenario): The associated demand scenario.
         building_id (int): The ID of the associated building.
         building (Building): The associated building.
-        design_vector_id (int): The ID of the associated design vector.
-        design_vector (DesignVector): The associated design vector.
         simulation_result (BuildingSimulationResult): The simulation result for the building.
     """
 
@@ -34,10 +33,6 @@ class DemandScenarioBuilding(SQLModel, table=True):
     )
     building_id: int = Field(..., foreign_key="Building.id")
     building: "Building" = Relationship(back_populates="demand_scenario_designs")
-    design_vector_id: int = Field(..., foreign_key="DesignVector.id")
-    design_vector: "DesignVector" = Relationship(
-        back_populates="demand_scenario_designs"
-    )
     simulation_result: "BuildingSimulationResult" = Relationship(
         back_populates="demand_scenario_building"
     )
@@ -79,6 +74,25 @@ class Building(SQLModel, table=True):
     )
 
 
+class ClimateScenarioTypeEnum(enum.IntEnum):
+    BUSINESS_AS_USUAL = 0
+    STABILIZED = 1
+    RUNAWAY = 2
+    IMPROVING = 3
+
+
+class BuildingRetrofitLevelTypeEnum(enum.IntEnum):
+    BASELINE = 0
+    SHALLOW = 1
+    DEEP = 2
+
+
+class BuildingSchedulesTypeEnum(enum.IntEnum):
+    STANDARD = 0
+    SETBACKS = 1
+    ADVANCED = 2
+
+
 class DemandScenario(SQLModel, table=True):
     """
     Represents a demand scenario.
@@ -107,24 +121,24 @@ class DemandScenario(SQLModel, table=True):
     demand_scenario_designs: list[DemandScenarioBuilding] = Relationship(
         back_populates="demand_scenario"
     )
-
-
-class DesignVector(SQLModel, table=True):
-    """
-    Represents a design vector for decarbonization of a campus building.
-
-    Attributes:
-        id (Optional[int]): The ID of the design vector.
-        name (str): The name of the design vector.
-        demand_scenario_designs (list[DemandScenarioBuilding]): The list of demand scenario designs associated with the design vector.
-    """
-
-    __tablename__ = "DesignVector"
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(..., description="Name of the design vector")
-    demand_scenario_designs: list[DemandScenarioBuilding] = Relationship(
-        back_populates="design_vector"
+    climate_scenario: Optional[ClimateScenarioTypeEnum] = Field(
+        sa_column=Column(Enum(ClimateScenarioTypeEnum))
     )
+    building_schedules: Optional[BuildingSchedulesTypeEnum] = Field(
+        sa_column=Column(Enum(BuildingSchedulesTypeEnum))
+    )
+    building_retrofit_level: Optional[BuildingRetrofitLevelTypeEnum] = Field(
+        sa_column=Column(Enum(BuildingRetrofitLevelTypeEnum))
+    )
+
+    def to_df(self) -> pd.DataFrame:
+        df = pd.concat(
+            [
+                building.simulation_result.to_df()
+                for building in self.demand_scenario_designs
+            ]
+        )
+        return df
 
 
 class BuildingSimulationResult(SQLModel, table=True):
@@ -167,8 +181,46 @@ class BuildingSimulationResult(SQLModel, table=True):
                 "equipment": self.equipment,
             }
         )
+        df.columns.name = "end_use"
         df.index = pd.date_range(start="1/1/2024", periods=8760, freq="h")
         df.index.name = "Timestamp"
+        df = df.set_index(
+            pd.Series(
+                [self.demand_scenario_building.demand_scenario.id] * 8760,
+                name="demand_scenario_id",
+            ),
+            append=True,
+        )
+        df = df.set_index(
+            pd.Series(
+                [self.demand_scenario_building.demand_scenario.climate_scenario] * 8760,
+                name="demand_scenario_climate",
+            ),
+            append=True,
+        )
+        df = df.set_index(
+            pd.Series(
+                [self.demand_scenario_building.demand_scenario.building_schedules]
+                * 8760,
+                name="demand_scenario_schedules",
+            ),
+            append=True,
+        )
+        df = df.set_index(
+            pd.Series(
+                [self.demand_scenario_building.demand_scenario.building_retrofit_level]
+                * 8760,
+                name="demand_scenario_retrofit",
+            ),
+            append=True,
+        )
+        df = df.set_index(
+            pd.Series(
+                [self.demand_scenario_building.demand_scenario.year_available] * 8760,
+                name="demand_scenario_year",
+            ),
+            append=True,
+        )
         df = df.set_index(
             pd.Series(
                 [self.demand_scenario_building.building.id] * 8760, name="building_id"
