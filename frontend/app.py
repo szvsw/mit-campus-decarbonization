@@ -25,6 +25,7 @@ from frontend import frontend_settings as settings
 from lib.client import client
 from lib.models import (
     Building,
+    BuildingLabStrategyTypeEnum,
     BuildingRetrofitLevelTypeEnum,
     BuildingSchedulesTypeEnum,
     BuildingSimulationResult,
@@ -98,6 +99,7 @@ def get_complete_building_demand_scenarios_by_meta(
     climate_scenario: ClimateScenarioTypeEnum,
     building_retrofit_level: BuildingRetrofitLevelTypeEnum,
     building_schedules: BuildingSchedulesTypeEnum,
+    building_lab_strategy: BuildingLabStrategyTypeEnum,
 ):
     with Session(engine) as session:
         try:
@@ -108,6 +110,7 @@ def get_complete_building_demand_scenarios_by_meta(
                 .where(
                     DemandScenario.building_retrofit_level == building_retrofit_level
                 )
+                .where(DemandScenario.lab_strategy == building_lab_strategy)
                 .where(DemandScenario.building_schedules == building_schedules)
             ).one()
         except NoResultFound:
@@ -146,6 +149,7 @@ def load_building_demand_paths():
             [
                 df["Building Retrofits Per Year"].astype(str),
                 df["Retrofit Scenario"],
+                df["Lab Scenario"],
                 df["Schedules Scenario"],
                 df["Weather Scenario"],
             ]
@@ -158,8 +162,10 @@ def load_building_demand_paths():
 def filter_df(
     df,
     described_df,
+    *,
     weather_scenario,
     schedules_scenario,
+    lab_scenario,
     retrofit_scenario,
     retrofit_rate,
     end_use,
@@ -175,6 +181,7 @@ def filter_df(
             if len(schedules_scenario) > 0
             else True
         )
+        & (df["Lab Scenario"].isin(lab_scenario) if len(lab_scenario) > 0 else True)
         & (
             df["Retrofit Scenario"].isin(retrofit_scenario)
             if len(retrofit_scenario) > 0
@@ -201,6 +208,11 @@ def filter_df(
         & (
             described_df["Schedules Scenario"].isin(schedules_scenario)
             if len(schedules_scenario) > 0
+            else True
+        )
+        & (
+            described_df["Lab Scenario"].isin(lab_scenario)
+            if len(lab_scenario) > 0
             else True
         )
         & (
@@ -426,7 +438,7 @@ def encode_csv(df: pd.DataFrame) -> str:
 
 
 def render_building_scenario_selector():
-    a, b, c, d = st.columns(4)
+    a, b, c, d, e = st.columns(5)
     with a:
         climate_scenario = st.selectbox(
             "Global Climate Scenario",
@@ -448,6 +460,13 @@ def render_building_scenario_selector():
             format_func=lambda x: x.name.lower().replace("_", " "),
         )
     with d:
+        building_lab_strategy = st.selectbox(
+            "Lab Retrofit Level",
+            help="Select a lab retrofit level.  As with retrofit levels, assumes all labs having been upgraded to this level.",
+            options=list(BuildingLabStrategyTypeEnum),
+            format_func=lambda x: x.name.lower().replace("_", " "),
+        )
+    with e:
         building_schedules = st.selectbox(
             "Building Schedules",
             help="Choose a set of schedules to use for the buildings.  As with retrofit levels, assumes all buildings having been upgraded to this level.",
@@ -459,6 +478,7 @@ def render_building_scenario_selector():
         climate_scenario=climate_scenario,
         building_retrofit_level=building_retrofit_level,
         building_schedules=building_schedules,
+        building_lab_strategy=building_lab_strategy,
     )
     if scenario is None:
         return None
@@ -482,7 +502,7 @@ def render_building_scenarios():
         st.download_button(
             "Download scenario results",
             encode_csv(df),
-            f"{scenario.year_available}_{scenario.climate_scenario.name}_{scenario.building_retrofit_level.name}_{scenario.building_schedules.name}_results.csv",
+            f"{scenario.year_available}_{scenario.climate_scenario.name}_{scenario.building_retrofit_level.name}_{scenario.lab_strategy.name}_{scenario.building_schedules.name}_results.csv",
             "Download scenario results",
             use_container_width=True,
             type="primary",
@@ -491,7 +511,7 @@ def render_building_scenarios():
         st.download_button(
             "Download scenario buildings results",
             encode_csv(df_buildings),
-            f"{scenario.year_available}_{scenario.climate_scenario.name}_{scenario.building_retrofit_level.name}_{scenario.building_schedules.name}_buildings_results.csv",
+            f"{scenario.year_available}_{scenario.climate_scenario.name}_{scenario.building_retrofit_level.name}_{scenario.lab_strategy.name}_{scenario.building_schedules.name}_buildings_results.csv",
             "Download scenario buildings results",
             use_container_width=True,
             type="primary",
@@ -660,7 +680,7 @@ def render_power_plants():
 
 def render_building_demand_paths():
     df, described_df = load_building_demand_paths()
-    a, b, c, d = st.columns(4)
+    a, b, c, d, e = st.columns(5)
     with a:
         weather_scenario = st.multiselect(
             "Climate Scenario",
@@ -683,6 +703,13 @@ def render_building_demand_paths():
             format_func=lambda x: x.replace("_", " ").lower(),
         )
     with d:
+        lab_scenario = st.multiselect(
+            "Lab Retrofit",
+            df["Lab Scenario"].unique(),
+            default="BASELINE",
+            format_func=lambda x: x.replace("_", " ").lower(),
+        )
+    with e:
         retrofit_rate = st.multiselect(
             "Buildings Retrofitted Per Year",
             df["Building Retrofits Per Year"].unique(),
@@ -699,11 +726,12 @@ def render_building_demand_paths():
     filtered_df, filtered_described_df = filter_df(
         df,
         described_df,
-        weather_scenario,
-        schedules_scenario,
-        retrofit_scenario,
-        retrofit_rate,
-        end_use,
+        weather_scenario=weather_scenario,
+        schedules_scenario=schedules_scenario,
+        lab_scenario=lab_scenario,
+        retrofit_scenario=retrofit_scenario,
+        retrofit_rate=retrofit_rate,
+        end_use=end_use,
     )
 
     # fig = px.line(
@@ -732,6 +760,22 @@ def render_building_demand_paths():
         labels={"50%": "Median Demand [J]"},
     )
     st.plotly_chart(ff, use_container_width=True)
+
+    # filtered_df["Color"] = (
+    #     filtered_df["Retrofit Scenario"]
+    #     + filtered_df["Schedules Scenario"]
+    #     + filtered_df["Weather Scenario"]
+    #     + filtered_df["Lab Scenario"]
+    #     + filtered_df["Building Retrofits Per Year"].astype(str)
+    # )
+    # ff = px.line(
+    #     filtered_df,
+    #     x="Year",
+    #     y="Demand [J]",
+    #     color="Color",
+    # )
+    # ff.update_traces(line=dict(width=1, color="rgba(200,200,200,0.15)"))
+    # st.plotly_chart(ff, use_container_width=True)
 
 
 def password_protect():

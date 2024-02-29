@@ -87,6 +87,12 @@ class BuildingRetrofitLevelTypeEnum(enum.IntEnum):
     DEEP = 2
 
 
+class BuildingLabStrategyTypeEnum(enum.IntEnum):
+    BASELINE = 0
+    SHALLOW = 1
+    DEEP = 2
+
+
 class BuildingSchedulesTypeEnum(enum.IntEnum):
     STANDARD = 0
     SETBACKS = 1
@@ -129,6 +135,9 @@ class DemandScenario(SQLModel, table=True):
     )
     building_retrofit_level: Optional[BuildingRetrofitLevelTypeEnum] = Field(
         sa_column=Column(Enum(BuildingRetrofitLevelTypeEnum))
+    )
+    lab_strategy: Optional[BuildingLabStrategyTypeEnum] = Field(
+        sa_column=Column(Enum(BuildingLabStrategyTypeEnum))
     )
 
     def to_df(self) -> pd.DataFrame:

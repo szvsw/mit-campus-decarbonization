@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 
 from lib.models import (
     Building,
+    BuildingLabStrategyTypeEnum,
     BuildingRetrofitLevelTypeEnum,
     BuildingSchedulesTypeEnum,
     BuildingSimulationResult,
@@ -30,7 +31,7 @@ if __name__ == "__main__":
         Create demand scenarios
         """
         demand_scenarios: list[DemandScenario] = []
-        for year, cs, rs, ss in tqdm(
+        for year, cs, rs, ss, ls in tqdm(
             list(
                 product(
                     list(
@@ -39,15 +40,17 @@ if __name__ == "__main__":
                     ClimateScenarioTypeEnum,
                     BuildingRetrofitLevelTypeEnum,
                     BuildingSchedulesTypeEnum,
+                    BuildingLabStrategyTypeEnum,
                 )
             )
         ):
             ds = DemandScenario(
-                name=f"year: {year}, climate: {cs.name.lower().replace('_', ' ')}, retrofit: {rs.name.lower()}, schedules: {ss.name.lower()}",
+                name=f"year: {year}, climate: {cs.name.lower().replace('_', ' ')}, retrofit: {rs.name.lower()}, schedules: {ss.name.lower()}, lab retrofit: {ls.name.lower()}",
                 year_available=year,
                 climate_scenario=cs,
                 building_retrofit_level=rs,
                 building_schedules=ss,
+                lab_strategy=ls,
             )
             session.add(ds)
             session.commit()
@@ -116,35 +119,41 @@ if __name__ == "__main__":
                 ):
                     factor = 1
                     climate_scenario_factors_heating = {
-                        ClimateScenarioTypeEnum.BUSINESS_AS_USUAL: 0.8,
+                        ClimateScenarioTypeEnum.BUSINESS_AS_USUAL: 0.83,
                         ClimateScenarioTypeEnum.STABILIZED: 1,
-                        ClimateScenarioTypeEnum.RUNAWAY: 0.6,
-                        ClimateScenarioTypeEnum.IMPROVING: 1.1,
+                        ClimateScenarioTypeEnum.RUNAWAY: 0.64,
+                        ClimateScenarioTypeEnum.IMPROVING: 1.15,
                     }
                     climate_scenario_factors_cooling = {
-                        ClimateScenarioTypeEnum.BUSINESS_AS_USUAL: 1.2,
+                        ClimateScenarioTypeEnum.BUSINESS_AS_USUAL: 1.15,
                         ClimateScenarioTypeEnum.STABILIZED: 1,
-                        ClimateScenarioTypeEnum.RUNAWAY: 1.4,
-                        ClimateScenarioTypeEnum.IMPROVING: 0.8,
+                        ClimateScenarioTypeEnum.RUNAWAY: 1.36,
+                        ClimateScenarioTypeEnum.IMPROVING: 0.77,
                     }
                     schedules_factors = {
                         BuildingSchedulesTypeEnum.STANDARD: 1,
-                        BuildingSchedulesTypeEnum.SETBACKS: 0.75,
+                        BuildingSchedulesTypeEnum.SETBACKS: 0.7,
                         BuildingSchedulesTypeEnum.ADVANCED: 0.5,
                     }
                     building_retrofit_factors = {
                         BuildingRetrofitLevelTypeEnum.BASELINE: 1,
-                        BuildingRetrofitLevelTypeEnum.SHALLOW: 0.75,
-                        BuildingRetrofitLevelTypeEnum.DEEP: 0.5,
+                        BuildingRetrofitLevelTypeEnum.SHALLOW: 0.8,
+                        BuildingRetrofitLevelTypeEnum.DEEP: 0.6,
+                    }
+                    lab_retrofit_factors = {
+                        BuildingLabStrategyTypeEnum.BASELINE: 1,
+                        BuildingLabStrategyTypeEnum.SHALLOW: 0.6,
+                        BuildingLabStrategyTypeEnum.DEEP: 0.4,
                     }
                     chsf = climate_scenario_factors_heating[ds.climate_scenario]
                     ccsf = climate_scenario_factors_cooling[ds.climate_scenario]
                     sf = schedules_factors[ds.building_schedules]
                     rf = building_retrofit_factors[ds.building_retrofit_level]
+                    lf = lab_retrofit_factors[ds.lab_strategy]
                     yf = (ds.year_available - 2025) / 25
                     assert yf <= 1.0
-                    h_rand = (yf * chsf + (1 - yf) * 1) * sf * rf
-                    c_rand = (yf * ccsf + (1 - yf) * 1) * sf * rf
+                    h_rand = (yf * chsf + (1 - yf) * 1) * sf * rf * lf
+                    c_rand = (yf * ccsf + (1 - yf) * 1) * sf * rf * lf
                     e_rand = sf * rf
                     l_rand = sf * rf
                     # h_rand = (np.random.rand() * 0.1 + 0.95) * f
