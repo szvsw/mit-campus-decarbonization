@@ -698,10 +698,10 @@ if __name__ == "__main__":
 
     make_npy()
 
-    ti.init(arch=ti.cpu, default_fp=ti.f32)
+    ti.init(arch=ti.gpu, default_fp=ti.f32)
 
     sim_manager = DemandScenarioProjector(
-        n_simulation_passes=5,
+        n_simulation_passes=100,
         n_weather_scenarios=4,
         n_years_per_eval=5,
         n_evals_per_building_scenario=6,
