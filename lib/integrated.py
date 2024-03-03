@@ -407,7 +407,7 @@ if __name__ == "__main__":
         "equipment": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
         "vehicle": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
     }
-    cop = {
+    district_cop = {
         "heating": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
         "cooling": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
     }
@@ -453,6 +453,9 @@ if __name__ == "__main__":
     scenarios.timesteps.demand.from_numpy(demand)
     scenarios.timesteps.cup.carbon_factors.from_numpy(cup_carbon_factors)
     scenarios.timesteps.cup.turbine_capacity.from_numpy(cup_turbine_capacity)
+    annual_emissions = np.zeros(
+        shape=(3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 25), dtype=np.float32
+    )
     for grid_scenario in tqdm(
         range(3),
         desc="Grid",
@@ -502,9 +505,32 @@ if __name__ == "__main__":
                             position=5,
                             leave=False,
                         ):
-                            scenarios.timesteps.district_system.cop.from_numpy(cop)
+                            scenarios.timesteps.district_system.cop.from_numpy(
+                                district_cop
+                            )
                             scenarios.timesteps.thermal_router.from_numpy(
                                 thermal_router
                             )
                             scenarios.compute()
+                            emissions = scenarios.timesteps.emissions.to_numpy()
+                            emissions = emissions.sum(axis=-1)
+                            assert (
+                                annual_emissions[
+                                    grid_scenario,
+                                    ccs_scenario,
+                                    battery_scenario,
+                                    deep_geo_scenario,
+                                    ureactor_scenario,
+                                    district_scenario,
+                                ].shape
+                                == emissions.shape
+                            )
+                            annual_emissions[
+                                grid_scenario,
+                                ccs_scenario,
+                                battery_scenario,
+                                deep_geo_scenario,
+                                ureactor_scenario,
+                                district_scenario,
+                            ] = emissions
                             ti.sync()
