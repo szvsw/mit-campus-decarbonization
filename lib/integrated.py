@@ -227,86 +227,86 @@ class Timestep:
         self.emissions = self.cup.carbon.emitted + self.grid.emitted
 
 
-def timestep_1hr(
-    total_heating_kWh: float,
-    total_cooling_kWh: float,
-    total_equipment_kWh: float,
-    total_lighting_kWh: float,
-    total_vehicle_kWh: float,
-    cup_vs_5gdhc_frac: float,
-    cup_heating_carbon_factor_kgCO2e_per_kWh: float,
-    cup_cooling_carbon_factor_kgCO2e_per_kWh: float,
-    cup_electricity_carbon_factor_kgCO2e_per_kWh: float,
-    cup_carbon_storage_capacity_kgCO2e: float,
-    cup_turbine_capacity_kW: float,
-    district_heating_cop: float,
-    district_cooling_cop: float,
-    uReactor_capacity_kWh: float,
-    PV_capacity_kWh: float,
-    deep_geo_capacity_kWh: float,
-    battery_capacity_kWh: float,
-    battery_state_of_charge_kWh: float,
-    battery_charge_rate_kW: float,
-    battery_discharge_rate_kW: float,
-    grid_carbon_factor_kgCO2e_per_kWh: float,
-):
-    # heating and cooling
-    cup_heating_kWh = total_heating_kWh * cup_vs_5gdhc_frac
-    cup_cooling_kWh = total_cooling_kWh * cup_vs_5gdhc_frac
-    district_heating_kWh = total_heating_kWh - cup_heating_kWh
-    district_cooling_kWh = total_cooling_kWh - cup_cooling_kWh
+# def timestep_1hr(
+#     total_heating_kWh: float,
+#     total_cooling_kWh: float,
+#     total_equipment_kWh: float,
+#     total_lighting_kWh: float,
+#     total_vehicle_kWh: float,
+#     cup_vs_5gdhc_frac: float,
+#     cup_heating_carbon_factor_kgCO2e_per_kWh: float,
+#     cup_cooling_carbon_factor_kgCO2e_per_kWh: float,
+#     cup_electricity_carbon_factor_kgCO2e_per_kWh: float,
+#     cup_carbon_storage_capacity_kgCO2e: float,
+#     cup_turbine_capacity_kW: float,
+#     district_heating_cop: float,
+#     district_cooling_cop: float,
+#     uReactor_capacity_kWh: float,
+#     PV_capacity_kWh: float,
+#     deep_geo_capacity_kWh: float,
+#     battery_capacity_kWh: float,
+#     battery_state_of_charge_kWh: float,
+#     battery_charge_rate_kW: float,
+#     battery_discharge_rate_kW: float,
+#     grid_carbon_factor_kgCO2e_per_kWh: float,
+# ):
+#     # heating and cooling
+#     cup_heating_kWh = total_heating_kWh * cup_vs_5gdhc_frac
+#     cup_cooling_kWh = total_cooling_kWh * cup_vs_5gdhc_frac
+#     district_heating_kWh = total_heating_kWh - cup_heating_kWh
+#     district_cooling_kWh = total_cooling_kWh - cup_cooling_kWh
 
-    # district system performance
-    # TODO: shared function for cop computation, possibly also depends on net, reservoir?
-    net_demand = district_heating_kWh - district_cooling_kWh
-    district_heating_elec_kWh = district_heating_kWh * district_heating_cop
-    district_cooling_elec_kWh = district_cooling_kWh * district_cooling_cop
+#     # district system performance
+#     # TODO: shared function for cop computation, possibly also depends on net, reservoir?
+#     net_demand = district_heating_kWh - district_cooling_kWh
+#     district_heating_elec_kWh = district_heating_kWh * district_heating_cop
+#     district_cooling_elec_kWh = district_cooling_kWh * district_cooling_cop
 
-    # electricity demand
-    total_elec_kWh = (
-        total_equipment_kWh
-        + total_lighting_kWh
-        + total_vehicle_kWh
-        + district_cooling_elec_kWh
-        + district_heating_elec_kWh
-    )
+#     # electricity demand
+#     total_elec_kWh = (
+#         total_equipment_kWh
+#         + total_lighting_kWh
+#         + total_vehicle_kWh
+#         + district_cooling_elec_kWh
+#         + district_heating_elec_kWh
+#     )
 
-    # clean electricity capacity
-    clean_elec_cap_kWh = uReactor_capacity_kWh + PV_capacity_kWh + deep_geo_capacity_kWh
-    elec_net_kWh = total_elec_kWh - clean_elec_cap_kWh
-    elec_surplus_kWh = max(0, -elec_net_kWh)  # TODO: surplus sales/storage
-    elec_deficit_kWh = max(0, elec_net_kWh)
-    # TODO: battery charging/discharging
-    # TODO: prioritiziation between cup and grid based off carbon, cost, etc
-    cup_elec_kWh = min(cup_turbine_capacity_kW, elec_deficit_kWh)
-    grid_elec_import_kWh = max(0, elec_deficit_kWh - cup_elec_kWh)
+#     # clean electricity capacity
+#     clean_elec_cap_kWh = uReactor_capacity_kWh + PV_capacity_kWh + deep_geo_capacity_kWh
+#     elec_net_kWh = total_elec_kWh - clean_elec_cap_kWh
+#     elec_surplus_kWh = max(0, -elec_net_kWh)  # TODO: surplus sales/storage
+#     elec_deficit_kWh = max(0, elec_net_kWh)
+#     # TODO: battery charging/discharging
+#     # TODO: prioritiziation between cup and grid based off carbon, cost, etc
+#     cup_elec_kWh = min(cup_turbine_capacity_kW, elec_deficit_kWh)
+#     grid_elec_import_kWh = max(0, elec_deficit_kWh - cup_elec_kWh)
 
-    # cup carbon
-    # TODO: shared function for carbon factor computation, possibly also depends on cap?
-    cup_electricity_carbon_kgCO2e = (
-        cup_elec_kWh * cup_electricity_carbon_factor_kgCO2e_per_kWh
-    )
-    cup_heating_carbon_kgCO2e = (
-        cup_heating_kWh * cup_heating_carbon_factor_kgCO2e_per_kWh
-    )
-    cup_cooling_carbon_kgCO2e = (
-        cup_cooling_kWh * cup_cooling_carbon_factor_kgCO2e_per_kWh
-    )
-    cup_carbon_kgCO2e = (
-        cup_electricity_carbon_kgCO2e
-        + cup_heating_carbon_kgCO2e
-        + cup_cooling_carbon_kgCO2e
-    )
-    cup_carbon_storage_kgCO2e = min(
-        cup_carbon_kgCO2e, cup_carbon_storage_capacity_kgCO2e
-    )
-    cup_emissions_kgCO2e = cup_carbon_kgCO2e - cup_carbon_storage_kgCO2e
+#     # cup carbon
+#     # TODO: shared function for carbon factor computation, possibly also depends on cap?
+#     cup_electricity_carbon_kgCO2e = (
+#         cup_elec_kWh * cup_electricity_carbon_factor_kgCO2e_per_kWh
+#     )
+#     cup_heating_carbon_kgCO2e = (
+#         cup_heating_kWh * cup_heating_carbon_factor_kgCO2e_per_kWh
+#     )
+#     cup_cooling_carbon_kgCO2e = (
+#         cup_cooling_kWh * cup_cooling_carbon_factor_kgCO2e_per_kWh
+#     )
+#     cup_carbon_kgCO2e = (
+#         cup_electricity_carbon_kgCO2e
+#         + cup_heating_carbon_kgCO2e
+#         + cup_cooling_carbon_kgCO2e
+#     )
+#     cup_carbon_storage_kgCO2e = min(
+#         cup_carbon_kgCO2e, cup_carbon_storage_capacity_kgCO2e
+#     )
+#     cup_emissions_kgCO2e = cup_carbon_kgCO2e - cup_carbon_storage_kgCO2e
 
-    # grid carbon
-    grid_emissions_kgCO2e = grid_elec_import_kWh * grid_carbon_factor_kgCO2e_per_kWh
+#     # grid carbon
+#     grid_emissions_kgCO2e = grid_elec_import_kWh * grid_carbon_factor_kgCO2e_per_kWh
 
-    # total carbon
-    emissions_kgCO2e = cup_emissions_kgCO2e + grid_emissions_kgCO2e
+#     # total carbon
+#     emissions_kgCO2e = cup_emissions_kgCO2e + grid_emissions_kgCO2e
 
 
 def sankey_ex():
