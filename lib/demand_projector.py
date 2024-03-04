@@ -12,6 +12,9 @@ from lib.models import (
     BuildingSchedulesTypeEnum,
     ClimateScenarioTypeEnum,
 )
+from lib.utils import EndUseEnum
+
+# TODO: add water
 
 
 def make_npy():
@@ -155,7 +158,7 @@ def make_npy():
             lab_strategy,
             building_schedules,
             building_id,
-            0,
+            EndUseEnum.heating,
             :,
         ] = heating
         final_array[
@@ -165,7 +168,7 @@ def make_npy():
             lab_strategy,
             building_schedules,
             building_id,
-            1,
+            EndUseEnum.cooling,
             :,
         ] = cooling
         final_array[
@@ -175,7 +178,7 @@ def make_npy():
             lab_strategy,
             building_schedules,
             building_id,
-            2,
+            EndUseEnum.lighting,
             :,
         ] = lighting
         final_array[
@@ -185,7 +188,7 @@ def make_npy():
             lab_strategy,
             building_schedules,
             building_id,
-            3,
+            EndUseEnum.equipment,
             :,
         ] = equipment
     assert np.isnan(final_array).sum() == 0
@@ -386,6 +389,8 @@ class DemandScenarioProjector:
         # get the results
         results = self.results.to_numpy()
         annual_results = results.sum(axis=(-1))
+        # TODO: select result closest to median?
+        hourly_result = results[0]
 
         # Create a multi-index for the DataFrame
         index = pd.MultiIndex.from_product(
@@ -423,7 +428,7 @@ class DemandScenarioProjector:
         melted_df["Schedules Scenario"] = retrofit_schedules_ix
         melted_df["Weather Scenario"] = weather_scenario_ix
 
-        return melted_df
+        return melted_df, hourly_result
 
     def run_retrofit_rates(
         self,
@@ -451,13 +456,14 @@ class DemandScenarioProjector:
             building_retrofit_rates (list[int]): The number of building upgrades executed per year
         """
         stacked_dfs = []
-        for n_upgrades_executed_per_year in tqdm(
-            building_retrofit_rates,
+        hourly_results = []
+        for i, n_upgrades_executed_per_year in tqdm(
+            enumerate(building_retrofit_rates),
             desc="Retrofit Rates",
             position=4,
             leave=False,
         ):
-            df = self.run_pass(
+            df, hourly = self.run_pass(
                 n_upgrades_executed_per_year=n_upgrades_executed_per_year,
                 baseline_template_ix=baseline_template_ix,
                 baseline_schedules_ix=baseline_schedules_ix,
@@ -468,8 +474,9 @@ class DemandScenarioProjector:
                 weather_scenario_ix=weather_scenario_ix,
             )
             stacked_dfs.append(df)
+            hourly_results.append(hourly)
         df = pd.concat(stacked_dfs, axis=0)
-        return df
+        return df, np.stack(hourly_results)
 
     def run_retrofit_scenarios(
         self,
@@ -497,13 +504,14 @@ class DemandScenarioProjector:
             building_retrofit_rates (list[int]): The number of building upgrades executed per year
         """
         stacked_dfs = []
+        hourly_results = []
         for retrofit_name, retrofit_template_ix in tqdm(
             retrofit_templates_ixs,
             desc="Retrofit",
             position=3,
             leave=False,
         ):
-            df = self.run_retrofit_rates(
+            df, hourly = self.run_retrofit_rates(
                 baseline_template_ix=baseline_template_ix,
                 baseline_lab_ix=baseline_lab_ix,
                 baseline_schedules_ix=baseline_schedules_ix,
@@ -514,11 +522,12 @@ class DemandScenarioProjector:
                 building_retrofit_rates=building_retrofit_rates,
             )
             stacked_dfs.append(df)
+            hourly_results.append(hourly)
         df = pd.concat(stacked_dfs, axis=0)
         df["Retrofit Scenario"] = df["Retrofit Scenario"].map(
             {ix: name for name, ix in retrofit_templates_ixs}
         )
-        return df
+        return df, np.stack(hourly_results)
 
     def run_lab_scenarios(
         self,
@@ -539,10 +548,11 @@ class DemandScenarioProjector:
         """
 
         stacked_dfs = []
+        hourly_results = []
         for lab_name, retrofit_lab_ix in tqdm(
             retrofit_lab_ixs, desc="Lab", position=2, leave=False
         ):
-            df = self.run_retrofit_scenarios(
+            df, hourly = self.run_retrofit_scenarios(
                 weather_scenario_ix=weather_scenario_ix,
                 baseline_template_ix=baseline_template_ix,
                 baseline_lab_ix=baseline_lab_ix,
@@ -553,11 +563,12 @@ class DemandScenarioProjector:
                 building_retrofit_rates=building_retrofit_rates,
             )
             stacked_dfs.append(df)
+            hourly_results.append(hourly)
         df = pd.concat(stacked_dfs, axis=0)
         df["Lab Scenario"] = df["Lab Scenario"].map(
             {ix: name for name, ix in retrofit_lab_ixs}
         )
-        return df
+        return df, np.stack(hourly_results)
 
     def run_schedules_scenarios(
         self,
@@ -584,13 +595,14 @@ class DemandScenarioProjector:
 
         """
         stacked_dfs = []
+        hourly_results = []
         for schedules_name, schedules_upgrade_ix in tqdm(
             retrofit_schedules_ixs,
             desc="Schedules",
             position=1,
             leave=False,
         ):
-            df = self.run_lab_scenarios(
+            df, hourly = self.run_lab_scenarios(
                 weather_scenario_ix=weather_scenario_ix,
                 baseline_template_ix=baseline_template_ix,
                 baseline_lab_ix=baseline_lab_ix,
@@ -601,11 +613,12 @@ class DemandScenarioProjector:
                 building_retrofit_rates=building_retrofit_rates,
             )
             stacked_dfs.append(df)
+            hourly_results.append(hourly)
         df = pd.concat(stacked_dfs, axis=0)
         df["Schedules Scenario"] = df["Schedules Scenario"].map(
             {ix: name for name, ix in retrofit_schedules_ixs}
         )
-        return df
+        return df, np.stack(hourly_results)
 
     def run_weather_scenarios(
         self,
@@ -639,13 +652,14 @@ class DemandScenarioProjector:
 
         """
         stacked_dfs = []
+        hourly_results = []
         for weather_name, weather_scenario_ix in tqdm(
             weather_scenario_ixs,
             desc="Weather",
             position=0,
             leave=False,
         ):
-            df = self.run_schedules_scenarios(
+            df, hourly = self.run_schedules_scenarios(
                 weather_scenario_ix=weather_scenario_ix,
                 baseline_template_ix=baseline_template_ix,
                 baseline_lab_ix=baseline_lab_ix,
@@ -656,6 +670,7 @@ class DemandScenarioProjector:
                 building_retrofit_rates=building_retrofit_rates,
             )
             stacked_dfs.append(df)
+            hourly_results.append(hourly)
         df = pd.concat(stacked_dfs, axis=0)
         df["Weather Scenario"] = df["Weather Scenario"].map(
             {ix: name for name, ix in weather_scenario_ixs}
@@ -689,19 +704,19 @@ class DemandScenarioProjector:
             .droplevel(0, axis=1)
             .reset_index()
         )
-        return df, described_df
+        return df, described_df, np.stack(hourly_results)
 
 
 if __name__ == "__main__":
     import plotly.express as px
     import plotly.graph_objects as go
 
-    make_npy()
+    # make_npy()
 
     ti.init(arch=ti.gpu, default_fp=ti.f32)
 
     sim_manager = DemandScenarioProjector(
-        n_simulation_passes=100,
+        n_simulation_passes=3,
         n_weather_scenarios=4,
         n_years_per_eval=5,
         n_evals_per_building_scenario=6,
@@ -713,7 +728,7 @@ if __name__ == "__main__":
         n_timesteps=8760,
     )
     sim_manager.load_from_np(np.load("data/all_scenarios.npy"))
-    df, described_df = sim_manager.run_weather_scenarios(
+    df, described_df, hourly = sim_manager.run_weather_scenarios(
         baseline_template_ix=0,
         baseline_lab_ix=0,
         baseline_schedules_ix=0,
@@ -734,12 +749,14 @@ if __name__ == "__main__":
             for schedules_scenario in BuildingSchedulesTypeEnum
         ],
         building_retrofit_rates=[
-            1,
             3,
             5,
             9,
         ],
     )
+    hourly = hourly.swapaxes(-2, -1)
+    np.save("data/hourly_results.npy", hourly)
+    exit()
     df.to_hdf("data/retrofit_path_results.hdf", key="results", mode="w")
     described_df.to_hdf(
         "data/retrofit_path_results.hdf", key="described_results", mode="a"

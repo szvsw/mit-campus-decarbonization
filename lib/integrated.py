@@ -1,8 +1,10 @@
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import taichi as ti
-from pydantic import BaseModel
+
+from lib.utils import EndUseEnum
 
 
 @ti.dataclass
@@ -102,7 +104,7 @@ class CUPCarbon:
 class CUP:
     demand: CUPDemand
     carbon_factors: CUPCarbonFactors
-    carbon_storage_capacity: ti.f32
+    carbon_capture_capacity: ti.f32
     turbine_capacity: ti.f32
     carbon: CUPCarbon
 
@@ -119,7 +121,7 @@ class CUP:
         cup_heating_carbon = self.demand.heating * self.carbon_factors.heating
         cup_cooling_carbon = self.demand.cooling * self.carbon_factors.cooling
         cup_carbon = cup_elec_carbon + cup_heating_carbon + cup_cooling_carbon
-        self.carbon.stored = ti.min(cup_carbon, self.carbon_storage_capacity)
+        self.carbon.stored = ti.min(cup_carbon, self.carbon_capture_capacity)
         self.carbon.emitted = cup_carbon - self.carbon.stored
 
 
@@ -384,9 +386,25 @@ def sankey_ex():
 class ScenarioComputer:
     timesteps: ti.StructField
 
-    def __init__(self):
+    def __init__(
+        self,
+        heating: np.ndarray,
+        cooling: np.ndarray,
+        lighting: np.ndarray,
+        equipment: np.ndarray,
+        vehicle: np.ndarray,
+    ):
         # weather scenario, retrofit scenario, lab scenario, schedule scenario, retrofit rate, years, timestep
-        self.timesteps = Timestep.field(shape=(3, 3, 3, 3, 3, 25, 8760))
+        demand = {
+            "heating": heating,
+            "cooling": cooling,
+            "lighting": lighting,
+            "equipment": equipment,
+            "vehicle": vehicle,
+        }
+        assert heating.shape == (4, 3, 3, 3, 3, 26, 8760)
+        self.timesteps = Timestep.field(shape=heating.shape)
+        self.timesteps.demand.from_numpy(demand)
 
     @ti.kernel
     def compute(self):
@@ -394,67 +412,172 @@ class ScenarioComputer:
             self.timesteps[i].compute()
 
 
+def dummy_district_scenario():
+    district_cop = []
+    # configure thermal router
+    thermal_router = []
+    for i in range(3):
+
+        district_cop.append(
+            {
+                "heating": (
+                    np.ones((scenarios.timesteps.shape)).astype(np.float32)
+                    * (3.0 if i <= 1 else 3.5)
+                ),
+                "cooling": (
+                    np.ones((scenarios.timesteps.shape)).astype(np.float32)
+                    * (4.0 if i <= 1 else 4.5)
+                ),
+            }
+        )
+
+        frac = np.ones((scenarios.timesteps.shape)).astype(np.float32)
+        if i == 0:
+            pass
+        else:
+            n_years = 20 - i * 5
+            total_years = heating.shape[-2]
+            assert total_years == 26
+            frac[:, :, :, :, :, :10] = 1.0
+            frac[:, :, :, :, :, :, 10 : 10 + n_years] = np.linspace(1.0, 0.0, n_years)
+            frac[:, :, :, :, :, :, 10 + n_years :] = 0.0
+
+        thermal_router.append({"cup_vs_5gdhc_frac": frac})
+    return district_cop, thermal_router
+
+
+def dummy_cup_carbon_factors():
+    cup_carbon_factors = {
+        "heating": np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0.181,
+        "cooling": np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0.181,
+        "electricity": np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0.181,
+    }
+    return cup_carbon_factors
+
+
+def dummy_cup_turbine_capacity():
+    cup_turbine_capacity = (
+        np.ones((scenarios.timesteps.shape)).astype(np.float32) * 40000
+    )
+    return cup_turbine_capacity
+
+
+def dummy_cup_carbon_capture_capacity():
+    cup_carbon_capture_capacities = []
+    for i in range(3):
+        cup_carbon_capture_capacity = np.ones((scenarios.timesteps.shape)).astype(
+            np.float32
+        ) * (3000 if i <= 1 else 4000)
+        if i == 0:
+            cup_carbon_capture_capacity *= 0
+        if i == 1:
+            cup_carbon_capture_capacity[:, :, :, :, :, :, :15] = 0
+        if i == 2:
+            cup_carbon_capture_capacity[:, :, :, :, :, :, :10] = 0
+        cup_carbon_capture_capacities.append(cup_carbon_capture_capacity)
+    return cup_carbon_capture_capacities
+
+
+def dummy_battery():
+
+    capacities = []
+    charge_rates = []
+    discharge_rates = []
+    for i in range(3):
+        battery_capacity = np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0
+        battery_charge_rate = (
+            np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0
+        )
+        battery_discharge_rate = (
+            np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0
+        )
+        capacities.append(battery_capacity)
+        charge_rates.append(battery_charge_rate)
+        discharge_rates.append(battery_discharge_rate)
+    return capacities, charge_rates, discharge_rates
+
+
+def dummy_grid_scenarios():
+    costs = []
+    emissions = []
+    for i in range(3):
+        # TODO: better costs
+        grid_cost_factors = {
+            "imp": np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0.1,
+            "ex": np.ones((scenarios.timesteps.shape)).astype(np.float32) * 0.05,
+        }
+        grid_carbon_factor = np.ones((scenarios.timesteps.shape)).astype(np.float32) * (
+            0.216
+        )
+        if i == 0:
+            year_decay = np.linspace(1.0, 0.0, scenarios.timesteps.shape[-2]).reshape(
+                -1, 1
+            )
+            base_shape = len(scenarios.timesteps.shape[:-2])
+            for i in range(base_shape):
+                year_decay = year_decay[np.newaxis, ...]
+            grid_carbon_factor *= year_decay
+        if i > 0:
+            finishing_year = 5 + 5 * i
+            year_decay = np.linspace(
+                1.0, 0.0, scenarios.timesteps.shape[-2] - finishing_year
+            )
+
+            year_decay = np.concatenate([year_decay, np.zeros((finishing_year,))])
+            year_decay = year_decay.reshape(-1, 1)
+            base_shape = len(scenarios.timesteps.shape[:-2])
+            for i in range(base_shape):
+                year_decay = year_decay[np.newaxis, ...]
+                grid_carbon_factor *= year_decay
+        costs.append(grid_cost_factors)
+        emissions.append(grid_carbon_factor)
+    return costs, emissions
+
+
 if __name__ == "__main__":
     ti.init(arch=ti.gpu, default_fp=ti.f32)
-    import numpy as np
     from tqdm import tqdm
 
-    scenarios = ScenarioComputer()
-    demand = {
-        "heating": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "cooling": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "lighting": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "equipment": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "vehicle": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-    }
-    district_cop = {
-        "heating": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "cooling": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-    }
-    thermal_router = {
-        "cup_vs_5gdhc_frac": np.random.rand(*(scenarios.timesteps.shape)).astype(
-            np.float32
-        ),
-    }
-    cup_carbon_factors = {
-        "heating": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "cooling": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "electricity": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-    }
-    cup_turbine_capacity = np.random.rand(*(scenarios.timesteps.shape)).astype(
-        np.float32
+    end_uses_J = np.load("data/hourly_results.npy")
+    end_uses_kWh = end_uses_J * 2.77778e-7
+    heating = end_uses_kWh[:, :, :, :, :, :, :, EndUseEnum.heating]
+    cooling = end_uses_kWh[:, :, :, :, :, :, :, EndUseEnum.cooling]
+    lighting = end_uses_kWh[:, :, :, :, :, :, :, EndUseEnum.lighting]
+    equipment = end_uses_kWh[:, :, :, :, :, :, :, EndUseEnum.equipment]
+    scenarios = ScenarioComputer(
+        heating=heating,
+        cooling=cooling,
+        lighting=lighting,
+        equipment=equipment,
+        vehicle=np.zeros_like(heating),
     )
-    cup_storage_capacity = np.random.rand(*(scenarios.timesteps.shape)).astype(
-        np.float32
-    )
+    cup_carbon_factors = dummy_cup_carbon_factors()
+    cup_turbine_capacity = dummy_cup_turbine_capacity()
+
+    district_cop, thermal_router = dummy_district_scenario()
+
+    cup_carbon_capture_capacity = dummy_cup_carbon_capture_capacity()
+
     clean_electricity = {
         "uReactor_capacity": np.random.rand(*(scenarios.timesteps.shape)).astype(
             np.float32
-        ),
-        "PV_capacity": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
+        )
+        * 0,
+        "PV_capacity": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32)
+        * 0,
         "deep_geo_capacity": np.random.rand(*(scenarios.timesteps.shape)).astype(
             np.float32
-        ),
+        )
+        * 0,
     }
-    grid_cost_factors = {
-        "imp": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-        "ex": np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32),
-    }
-    grid_carbon_factor = np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32)
-    battery_capacity = np.random.rand(*(scenarios.timesteps.shape)).astype(np.float32)
-    battery_charge_rate = np.random.rand(*(scenarios.timesteps.shape)).astype(
-        np.float32
-    )
-    battery_discharge_rate = np.random.rand(*(scenarios.timesteps.shape)).astype(
-        np.float32
-    )
+    grid_cost_factors, grid_carbon_factor = dummy_grid_scenarios()
+    battery_capacity, battery_charge_rate, battery_discharge_rate = dummy_battery()
 
     # shared data
-    scenarios.timesteps.demand.from_numpy(demand)
     scenarios.timesteps.cup.carbon_factors.from_numpy(cup_carbon_factors)
     scenarios.timesteps.cup.turbine_capacity.from_numpy(cup_turbine_capacity)
     annual_emissions = np.zeros(
-        shape=(3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 25), dtype=np.float32
+        shape=(3, 3, 3, 3, 3, 3, 4, 3, 3, 3, 3, 26), dtype=np.float32
     )
     for grid_scenario in tqdm(
         range(3),
@@ -462,16 +585,18 @@ if __name__ == "__main__":
         position=0,
         leave=False,
     ):
-        scenarios.timesteps.grid.costs.from_numpy(grid_cost_factors)
-        scenarios.timesteps.grid.carbon_factor.from_numpy(grid_carbon_factor)
+        scenarios.timesteps.grid.costs.from_numpy(grid_cost_factors[grid_scenario])
+        scenarios.timesteps.grid.carbon_factor.from_numpy(
+            grid_carbon_factor[grid_scenario]
+        )
         for ccs_scenario in tqdm(
             range(3),
             desc="CCS",
             position=1,
             leave=False,
         ):
-            scenarios.timesteps.cup.carbon_storage_capacity.from_numpy(
-                cup_storage_capacity
+            scenarios.timesteps.cup.carbon_capture_capacity.from_numpy(
+                cup_carbon_capture_capacity[ccs_scenario]
             )
             for battery_scenario in tqdm(
                 range(3),
@@ -479,10 +604,14 @@ if __name__ == "__main__":
                 position=2,
                 leave=False,
             ):
-                scenarios.timesteps.battery.capacity.from_numpy(battery_capacity)
-                scenarios.timesteps.battery.charge_rate.from_numpy(battery_charge_rate)
+                scenarios.timesteps.battery.capacity.from_numpy(
+                    battery_capacity[battery_scenario]
+                )
+                scenarios.timesteps.battery.charge_rate.from_numpy(
+                    battery_charge_rate[battery_scenario]
+                )
                 scenarios.timesteps.battery.discharge_rate.from_numpy(
-                    battery_discharge_rate
+                    battery_discharge_rate[battery_scenario]
                 )
                 for deep_geo_scenario in tqdm(
                     range(3),
@@ -506,10 +635,10 @@ if __name__ == "__main__":
                             leave=False,
                         ):
                             scenarios.timesteps.district_system.cop.from_numpy(
-                                district_cop
+                                district_cop[district_scenario]
                             )
                             scenarios.timesteps.thermal_router.from_numpy(
-                                thermal_router
+                                thermal_router[district_scenario]
                             )
                             scenarios.compute()
                             emissions = scenarios.timesteps.emissions.to_numpy()
@@ -534,3 +663,19 @@ if __name__ == "__main__":
                                 district_scenario,
                             ] = emissions
                             ti.sync()
+    import plotly.graph_objects as go
+
+    # flatten all but the last axis of annual_emissions
+    print(annual_emissions.shape)
+    annual_emissions = annual_emissions.reshape(-1, annual_emissions.shape[-1])
+    fig = go.Figure()
+    for i in range(annual_emissions.shape[0]):
+        if np.random.rand() < 0.05:
+            fig.add_trace(
+                go.Scatter(x=np.arange(26), y=annual_emissions[i], mode="lines")
+            )
+
+    fig.update_traces(
+        line=dict(width=0.5, color="rgba(0,0,0,0.25)"),
+    )
+    fig.show()
