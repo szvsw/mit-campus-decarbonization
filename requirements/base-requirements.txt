@@ -8,3 +8,4 @@ sqlmodel
 tables
 taichi
 tqdm
+boto3

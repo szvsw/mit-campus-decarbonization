@@ -1,6 +1,8 @@
+from functools import cached_property
 from typing import Optional
 
-from pydantic import Field, computed_field
+import boto3
+from pydantic import DirectoryPath, Field, SecretStr, computed_field
 from pydantic_settings import BaseSettings
 
 
@@ -25,4 +27,37 @@ class SupaSettings(BaseSettings):
         env_file = ".env"
 
 
+class AwsSettings(BaseSettings):
+    access_key_id: SecretStr = Field(..., env="ACCESS_KEY_ID")
+    secret_access_key: SecretStr = Field(..., env="SECRET_ACCESS_KEY")
+    default_region: str = Field(..., env="DEFAULT_REGION")
+    region: str = Field(..., env="REGION")
+    account_id: SecretStr = Field(..., env="ACCOUNT_ID")
+    bucket: SecretStr = Field(..., env="BUCKET")
+
+    class Config:
+        env_prefix = "AWS_"
+        env_file = ".env"
+
+    @cached_property
+    def s3_client(self):
+        return boto3.client(
+            "s3",
+            aws_access_key_id=self.access_key_id.get_secret_value(),
+            aws_secret_access_key=self.secret_access_key.get_secret_value(),
+            region_name=self.region,
+        )
+
+
+class ConfigSettings(BaseSettings):
+    log_level: str = Field(..., env="LOG_LEVEL")
+    data_dir: DirectoryPath = Field("data", env="DATA_DIR")
+
+    class Config:
+        env_prefix = "CONFIG_"
+        env_file = ".env"
+
+
 supa_settings = SupaSettings()
+aws_settings = AwsSettings()
+config_settings = ConfigSettings()
