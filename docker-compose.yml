@@ -8,3 +8,9 @@ services:
       - .env
     ports:
       - "8501:8501"
+  worker:
+    build: 
+      context: .
+      dockerfile: lib/worker/Dockerfile
+    env_file:
+      - .env

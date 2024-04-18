@@ -1,0 +1,6 @@
+pydantic
+pydantic_settings
+pandas
+boto3
+tqdm
+tables

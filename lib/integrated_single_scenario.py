@@ -25,6 +25,9 @@ logger.setLevel(config.log_level)
 data_dir = config.data_dir / "iam"
 UPGRADE_SEQUENCE_PATH = data_dir / "renovation_upgrade_sequence.csv"
 DS_PHASED_SEQUENCE_PATH = data_dir / "district_phased.csv"
+GRID_EMISSIONS_PATH = data_dir / "grid_data.csv"
+
+HDF_CACHE = {}
 
 
 class ScenarioType(Enum):
@@ -56,12 +59,12 @@ class BaseScenario(BaseModel):
     retrofit: ScenarioType
     schedules: ScenarioType
     lab: ScenarioType
-    district_system: ScenarioType
+    district: ScenarioType
     nuclear: ScenarioType
-    deep_geothermal: ScenarioType
-    renovation_rate: RenovationRateScenarioType
-    storage: ScenarioType
-    carbon_capture: ScenarioType
+    deepgeo: ScenarioType
+    renorate: RenovationRateScenarioType
+    ess: ScenarioType
+    ccs: ScenarioType
 
     def __repr__(self) -> str:
         base = "\nScenario:"
@@ -90,6 +93,12 @@ class BaseScenario(BaseModel):
 
         df["Scenario"] = df.index.to_frame().apply(create_scenario, axis=1)
         return df
+
+    def to_index(self):
+        values = tuple((v.name for v in self.model_dump().values()))
+        names = list(self.model_dump().keys())
+        index = pd.MultiIndex.from_tuples([values], names=names)
+        return index
 
 
 class Scenario(BaseModel, arbitrary_types_allowed=True):
@@ -183,6 +192,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         logger.debug("Concatenating artifacts...")
         source = pd.concat(source_dfs).sort_index(level="sort_id")
         target = pd.concat(target_dfs).sort_index(level="sort_id")
+        source["Electricity"] = source["Electricity"]
+        target["Electricity"] = target["Electricity"]
         self.source_df = source
         self.target_df = target
         assert self.source_df.index.to_frame(index=False)[
@@ -206,16 +217,17 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             return artifact_path
 
     def open_hdf(self, path: Path) -> pd.DataFrame:
-        return pd.read_hdf(path)
+        if path.name in HDF_CACHE:
+            return HDF_CACHE[path.name]
+        df = pd.read_hdf(path)
+        HDF_CACHE[path.name] = df
+        return df
 
     def bldg_loads(self, year: int, start_year=2025, final_year=2050):
         phase = year % 10
         interp = phase / 10
         lower_year = max(start_year, year - phase)
         upper_year = min(final_year, year - phase + 10)
-        logger.debug(
-            f"Interpolating between {lower_year} and {upper_year} for year {year}"
-        )
         results = []
         for segment, df in [("source", self.source_df), ("target", self.target_df)]:
             df: pd.DataFrame = df
@@ -260,7 +272,7 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         df = pd.concat(dfs)
         upgrade_year = self.reno_seq.loc[
             df.index.get_level_values("building_id"),
-            f"retrofit_year_{self.x.renovation_rate.name}",
+            f"retrofit_year_{self.x.renorate.name}",
         ].values
         partial_actually_ugprades = self.reno_seq.loc[
             df.index.get_level_values("building_id"), "sched_partial_flag"
@@ -282,51 +294,57 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         """
         assign each year row as cup or ds
         """
-        phases = pd.read_csv(DS_PHASED_SEQUENCE_PATH)
-        scheduled = self.scheduled_loads
-        if self.x.district_system == ScenarioType.baseline:
-            # everything is cup
-            assignments = pd.Series(index=scheduled.index, data="cup")
-        elif self.x.district_system == ScenarioType.partial:
-            raise NotImplementedError("Partial district system not implemented yet.")
-            # everything goes to new district system
-            # only some buildings are ds
-        elif self.x.district_system == ScenarioType.full:
-            raise NotImplementedError("Partial district system not implemented yet.")
-            # some buildings are ds according to phasing
-            # some buildings are cup
-        if self.x.carbon_capture != ScenarioType.baseline:
-            raise NotImplementedError("Only baseline carbon capture is supported")
 
-        if self.x.storage != ScenarioType.baseline:
-            raise NotImplementedError("Only baseline storage is supported")
-
-        if self.x.nuclear != ScenarioType.baseline:
-            raise NotImplementedError("Only baseline nuclear is supported")
-
-        if self.x.deep_geothermal != ScenarioType.baseline:
-            raise NotImplementedError("Only baseline deep geothermal is supported")
-
-        if self.x.lab != ScenarioType.baseline:
-            raise NotImplementedError("Only baseline lab is supported")
-
-        if self.x.district_system != ScenarioType.baseline:
-            raise NotImplementedError("Only baseline district system is supported")
+        bldg_ids = self.source_df.index.get_level_values("building_id").unique()
+        phases = self.generate_district_phases(bldg_ids)
+        time_index = (
+            self.scheduled_loads.groupby(level="epw_year")
+            .first()
+            .stack(level="DateTime", future_stack=True)
+            .index
+        )
+        clean_capacity = self.generate_clean_capacity(ix=time_index)
+        logger.warning("NO GRID ARBITRAGE SCENARIO")
 
         assignments = pd.Series(
             index=self.scheduled_loads.index,
             data="cup",
             name="thermal_assignment",
         )
+        year_idx = self.scheduled_loads.index.get_level_values("epw_year")
+        upgrade_years = phases.loc[
+            self.scheduled_loads.index.get_level_values("building_id"),
+            "district_upgrade_year",
+        ]
+        is_switched = year_idx >= upgrade_years
+        # TODO: handle non cup bulidings according to phase?
+        if self.x.district == ScenarioType.baseline:
+            # everything is cup
+            pass
+        elif self.x.district == ScenarioType.partial:
+            assignments[is_switched] = "district"
+            # only some buildings are ds
+        elif self.x.district == ScenarioType.full:
+            # some buildings are ds according to phasing
+            # some buildings are cup
+            logger.warning("District FULL scenario Not Different Enough!")
+            assignments[is_switched] = "district"
 
-        np.random.seed(42)
-        assignments = pd.Series(
-            index=self.scheduled_loads.index,
-            # data=np.random.choice(["cup", "district"], len(s.scheduled_loads), replace=True),
-            data=np.random.choice(["cup"], len(self.scheduled_loads), replace=True),
-            name="thermal_assignment",
-        )
+        logger.warning("CARBON CAPTURE SCENARIOS NEEDS FINALIZING")
+        if self.x.ccs != ScenarioType.baseline:
+            raise NotImplementedError("Only baseline carbon capture is supported")
 
+        logger.warning("ESS SCENARIOS NEEDS FINALIZING")
+        if self.x.ess != ScenarioType.baseline:
+            raise NotImplementedError("Only baseline ESS is supported")
+
+        logger.warning("DEEP GEOTHERMAL SCENARIOS NEEDS FINALIZING")
+
+        logger.warning("SCHEDULES PARTIAL needs finalizing")
+        if self.x.schedules == ScenarioType.partial:
+            raise NotImplementedError("Partial schedules not supported yet")
+
+        assert (assignments.index == self.scheduled_loads.index).all()
         df = self.scheduled_loads.set_index(assignments, append=True)
         electricity_loads: pd.Series = (
             self.scheduled_loads["Electricity"]
@@ -334,7 +352,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             .sum()
             .stack(future_stack=True)
         )
-        # TODO: vehicles
+
+        logger.warning("VEHICLE LOADS NEEDED")
         vehicle_loads = pd.Series(
             index=electricity_loads.index, data=0, name="vehicle_loads"
         )
@@ -344,225 +363,276 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             .groupby(["epw_year", "thermal_assignment"])
             .sum()
         )
+        full_ix = pd.MultiIndex.from_product(
+            [
+                thermal_loads.index.get_level_values("epw_year").unique(),
+                ["cup", "district"],
+            ],
+            names=["epw_year", "thermal_assignment"],
+        )
+        mask = full_ix.isin(thermal_loads.index)
+        missing_rows = full_ix[~mask]
+        thermal_loads = (
+            pd.concat(
+                [
+                    thermal_loads,
+                    pd.DataFrame(
+                        data=np.zeros((len(missing_rows), len(thermal_loads.columns))),
+                        index=missing_rows,
+                        columns=thermal_loads.columns,
+                    ),
+                ]
+            )
+            .fillna(0.0)
+            .sort_index()
+        )
+
         thermal_loads["Heating"] = thermal_loads["Heating"] + thermal_loads["Water"]
+
         thermal_loads = thermal_loads.drop(columns="Water")
+
         thermal_loads: pd.DataFrame = thermal_loads.stack(
             level="end_use", future_stack=True
-        ).unstack(level="epw_year")
-
-        deep_geothermal_thermal_capacity = pd.Series(
-            index=pd.MultiIndex.from_frame(
-                thermal_loads.T.reset_index()[["epw_year", "DateTime"]],
-                names=["epw_year", "DateTime"],
-            ),
-            data=0,
-            name="clean_thermal_supply",
-        ).sort_index()
-
-        thermal_loads = thermal_loads.swaplevel(i=0, j=1, axis=0)
-        thermal_loads = thermal_loads.T
-        cup_heating_delta = (
-            thermal_loads["Heating"]["cup"] - deep_geothermal_thermal_capacity
         )
+        thermal_loads = thermal_loads.unstack(level="epw_year")
+        thermal_loads = (
+            thermal_loads.swaplevel(0, 1, axis=1).T.sort_index().T
+        )  # year then time
+
+        if ("district", "Heating") not in thermal_loads.index:
+            logger.debug("Adding empty district heating")
+            thermal_loads.loc[("district", "Heating"), :] = 0.0
+        if ("district", "Cooling") not in thermal_loads.index:
+            logger.debug("Adding empty district cooling")
+            thermal_loads.loc[("district", "Cooling"), :] = 0.0
+        tups = [
+            ("district", "Heating"),
+            ("district", "Cooling"),
+            ("cup", "Heating"),
+            ("cup", "Cooling"),
+        ]
+        tests = [tup in thermal_loads.index for tup in tups]
+        assert all(tests), f"Missing at least some thermal load tups: {tups}"
+        thermal_loads = thermal_loads.T
+        original_thermal_loads = thermal_loads.copy(deep=True)
+        assert (thermal_loads.index == time_index).all()
+
+        clean_thermal_capacity = clean_capacity.th.sum(axis=1).rename("clean_thermal")
+
+        cup_heating_delta = thermal_loads["cup"]["Heating"] - clean_thermal_capacity
         cup_heating_remaining = cup_heating_delta.clip(0, None)
-        deep_geothermal_remaining = cup_heating_delta.clip(None, 0).abs()
+        clean_thermal_remaining = cup_heating_delta.clip(None, 0).abs()
         district_heating_delta = (
-            (thermal_loads["Heating"]["district"] - deep_geothermal_remaining)
-            if "district" in thermal_loads["Heating"].columns
+            (
+                thermal_loads["district"]["Heating"]
+                - clean_thermal_remaining
+                * (
+                    0.0 if self.x.district == ScenarioType.full else 1.0
+                )  # deep geothermal can't provide heat to low temp system
+            )
+            if "district" in thermal_loads.columns
             else pd.Series(
                 index=cup_heating_delta.index,
                 data=0,
             )
         )
         district_heating_remaining = district_heating_delta.clip(0, None)
-        thermal_loads.loc[cup_heating_remaining.index, ("Heating", "cup")] = (
+        clean_thermal_remaining = district_heating_delta.clip(None, 0).abs()
+        thermal_loads.loc[cup_heating_remaining.index, ("cup", "Heating")] = (
             cup_heating_remaining
         )
-        thermal_loads.loc[district_heating_remaining.index, ("Heating", "district")] = (
+        thermal_loads.loc[district_heating_remaining.index, ("district", "Heating")] = (
             district_heating_remaining
         )
-        deep_geothermal_thermal_utilization = (
-            deep_geothermal_thermal_capacity - deep_geothermal_remaining
-        ).rename("Deep Geothermal Utilization")
 
-        thermal_loads = thermal_loads.T
-        thermal_loads = thermal_loads.swaplevel(i=1, j=0, axis=0)
+        # TODO: should we try to knock off some steam-driven chiller energy?
+        clean_thermal_utilization = (
+            clean_thermal_capacity - clean_thermal_remaining
+        ).rename("Clean Thermal Utilization")
+
+        # thermal_loads = thermal_loads.T
+        # thermal_loads = thermal_loads.swaplevel(i=1, j=0, axis=0)
 
         MWh_per_mmBtu = 1 / 3.412  # MWh/mmBtu
         lbs_per_kg = 2.20462
-        # Data from 2019_MIT_OS_CUP's_energy_Demand 4.421.pdf slide 15
-        # CHP Mode
-        cup_power = 15.8  # MW
-        cup_turbine_gas_consumption_for_1hr = 214.2  # mmBtu/hr
-        cup_kg_CO2eq_per_MWh_elec = 273
-        cup_kg_CO2eq_per_kWh_elec = cup_kg_CO2eq_per_MWh_elec / 1000
-        cup_kg_CO2eq_per_MWh_gas = 180  # TODO: TACIT - check this!!
-        cup_kg_CO2eq_per_kWh_gas = cup_kg_CO2eq_per_MWh_gas / 1000
-        cup_energy_for_1hr = cup_power  # MWh/hr
-        cup_turbine_gas_consumption_for_1hr = (
-            cup_turbine_gas_consumption_for_1hr * MWh_per_mmBtu
-        )  # MWh/hr
-        cup_elec_cop = (
-            cup_energy_for_1hr / cup_turbine_gas_consumption_for_1hr
-        )  # unitless
-
-        # # Heat Only Mode
-        # cup_heating_only_cop = 0.4
-        # cup_steam_psi = 200
-        # cup_kips_steam_per_hour = 114  # kips/hr
-        # cup_mmBtu_gas_per_hour = 153  # mmBtu/hr
-        # cup_lbs_CO2_eq_per_kip_steam = 158  # lbs CO2eq/kip
-        # cup_lbs_CO2_eq_per_hour = (
-        #     cup_lbs_CO2_eq_per_kip_steam * cup_kips_steam_per_hour
-        # )  # lbs CO2eq/hr
-        # cup_kg_CO2eq_per_hour = cup_lbs_CO2_eq_per_hour / lbs_per_kg  # kg CO2eq/hr
-        # cup_kg_CO2eq_per_kip_steam = (
-        #     cup_kg_CO2eq_per_hour / cup_kips_steam_per_hour
-        # )  # kg CO2eq/kip
-        # cup_mmBtu_steam_per_hour = cup_mmBtu_gas_per_hour * cup_heating_only_cop
-        # cup_mmBtu_steam_per_kip_steam = (
-        #     cup_mmBtu_steam_per_hour / cup_kips_steam_per_hour
-        # )  # mmBtu/kip
-
+        steam_enthalpy_200psi_Btu_per_lb = 1199
+        steam_enthalpy_200psi_mmBtu_per_kip = (
+            steam_enthalpy_200psi_Btu_per_lb * 1000 / 1e6
+        )
         cup_elec_capacity = 40000
-        cup_heat_cop = 0.4
-        cup_elec_chiller_cop = 4.0
+        cup_boiler_capacity_kps_per_hr = 80 * 2 + 100 + 60 + 100
+        cup_hrsg_capacity_kps_per_hr_unfired = 80
+        cup_hrsg_capacity_kps_per_hr = 180  # fired
+        cup_boiler_capcity_mmBtu_per_hr = (
+            cup_boiler_capacity_kps_per_hr * steam_enthalpy_200psi_mmBtu_per_kip
+        )
+        cup_hrsg_capacity_mmBtu_per_hr_unfired = (
+            cup_hrsg_capacity_kps_per_hr_unfired * steam_enthalpy_200psi_mmBtu_per_kip
+        )
+        cup_hrsg_capacity_mmBtu_per_hr = (
+            cup_hrsg_capacity_kps_per_hr * steam_enthalpy_200psi_mmBtu_per_kip
+        )
+        cup_boiler_capacity = cup_boiler_capcity_mmBtu_per_hr * MWh_per_mmBtu * 1000
+        cup_hrsg_capacity_unfired = (
+            cup_hrsg_capacity_mmBtu_per_hr_unfired * MWh_per_mmBtu * 1000
+        )
+        cup_hrsg_capacity = cup_hrsg_capacity_mmBtu_per_hr * MWh_per_mmBtu * 1000
+        cup_turbine_elec_cop = 0.29
+        cup_turbine_heat_cop = 0.39
+        cup_hrsg_heat_cop = 0.39
+        cup_boiler_heat_cop = 0.89
+        logger.warning("CHANGE CHILLER COPs")
+        cup_elec_chiller_cop = 3.5
         cup_gas_chiller_cop = 1.8  # https://www.johnsoncontrols.co.th/-/media/jci/be/united-states/hvac-equipment/chillers/files/be_yst_res_steam-turbine-chillers.pdf?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301
-        chiller_balance = 0.5  # 0 = elec chiller, 1 = steam driven chiller
-        ds_heat_cop = 3.5 if self.x.district_system == ScenarioType.partial else 3.3
-        ds_cool_cop = 3.5 if self.x.district_system == ScenarioType.partial else 3.3
+        chiller_balance = 0.4  # 0 = elec chiller, 1 = steam driven chiller
+        ds_heat_cop = 3.5 if self.x.district == ScenarioType.partial else 3.3
+        ds_cool_cop = 3.5 if self.x.district == ScenarioType.partial else 3.3
+        cup_carbon_coeff_kgCO2eq_per_kWh_gas = 0.181  # standard
 
-        # TODO: should cup chiller have a max capacity
-        # TODO: should cup chiller only be served by cup electricity?
-        # TODO: how should we control the cup steam vs elec chiller balance?
-        # TODO: should cop's depend on weather conditions etc
-        transfer_matrix = pd.DataFrame(
-            {
-                ("Cooling", "Gas"): [
-                    1 / cup_gas_chiller_cop * chiller_balance,
-                    0,
-                ],
-                ("Heating", "Gas"): [
-                    1 / cup_heat_cop,
-                    0,
-                ],
-                ("Cooling", "Electricity"): [
-                    1 / cup_elec_chiller_cop * (1 - chiller_balance),
-                    1 / ds_cool_cop,
-                ],
-                ("Heating", "Electricity"): [
-                    0,
-                    1 / ds_heat_cop,
-                ],
-            },
-            columns=pd.MultiIndex.from_tuples(
-                [
-                    ("Cooling", "Gas"),
-                    ("Heating", "Gas"),
-                    ("Cooling", "Electricity"),
-                    ("Heating", "Electricity"),
-                ],
-                names=["end_use", "fuel"],
-            ),
-            index=pd.Series(
-                [
-                    "cup",
-                    "district",
-                ],
-                name="thermal_assignment",
-            ),
+        # reduce thermal heating demands by deep geothermal if available
+        # split buildings between cup and district if available according to phasing
+        # cup cooling -> split between chillers -> move chillers to gas and electricity using cops
+        # district heating/cooling -> move to electricity using cops
+        # reduce electricity by available clean electricity
+        # convert reamining electricity to gas using turbine (up to capacity)
+        # convert gas burned for elec to free heat using hrsg cop
+        # reduce cup heating by free heat
+        # split remaining heating between fired hrsg and boilers
+        # burn gas at hrsg and boilers to supply remaining heat
+        # convert gas to CO2 using coeffs.
+        elec_chiller_load = thermal_loads["cup"]["Cooling"] * (1 - chiller_balance)
+        gas_chiller_load = thermal_loads["cup"]["Cooling"] * chiller_balance
+        elec_chiller_demand = elec_chiller_load / cup_elec_chiller_cop
+        gas_chiller_demand = gas_chiller_load / cup_gas_chiller_cop
+        elec_district_demand = (
+            thermal_loads["district"]["Cooling"] / ds_cool_cop
+            + thermal_loads["district"]["Heating"] / ds_heat_cop
+        )
+        elec_demand_from_thermal = elec_chiller_demand + elec_district_demand
+
+        elec_demand = elec_demand_from_thermal + electricity_loads
+        clean_electricity_capacity = clean_capacity.e.sum(axis=1).rename(
+            "clean_electricity"
         )
 
-        stacked_mat: pd.DataFrame = transfer_matrix.stack(
-            level=["end_use"],
-            future_stack=True,
-        ).fillna(0)
-
-        coeffs: pd.DataFrame = stacked_mat.loc[thermal_loads.index]
-        fuel_demands_from_conditioning: pd.DataFrame = thermal_loads.T.dot(coeffs)
-        fuel_demands_from_conditioning.index = (
-            fuel_demands_from_conditioning.index.swaplevel(0, 1)
-        )
-        fuel_demands_from_conditioning: pd.DataFrame = (
-            fuel_demands_from_conditioning.sort_index()
-        )
-
-        # TODO: add clean energy sources
-        clean_electricity = pd.Series(
-            index=fuel_demands_from_conditioning.index,
-            data=0,
-            name="Electricity",
-        )
-        full_elec_demand = (
-            fuel_demands_from_conditioning["Electricity"] + electricity_loads
-        )
-        elec_demand_delta = full_elec_demand - clean_electricity
+        elec_demand_delta = elec_demand - clean_electricity_capacity
         surplus_clean = elec_demand_delta.clip(None, 0).abs()
+        logger.warning("NOT USING SURPLUS CLEAN")
         unmet_elec_demand = elec_demand_delta.clip(0, None)
-
-        # # TODO: decide between purchasing vs generating based off of cost to operate cup per kWh, emissions per kWh, and grid equivalents
-        # TODO: using energy storage etc
         cup_elec_demand = unmet_elec_demand.clip(0, cup_elec_capacity)
-        grid_elec_demand = unmet_elec_demand - cup_elec_demand
-
-        grid_data = self.generate_grid_data(
-            time_index=self.source_df.xs(2025, level="epw_year")["Electricity"].columns,
-            epw_years=pd.Series(
-                grid_elec_demand.index.get_level_values("epw_year")
-                .unique()
-                .sort_values(),
-                name="epw_year",
-            ),
+        grid_elec_import = unmet_elec_demand - cup_elec_demand
+        gas_cup_turbine_demand = cup_elec_demand / cup_turbine_elec_cop
+        free_cup_heating = (gas_cup_turbine_demand * cup_turbine_heat_cop).clip(
+            0, cup_hrsg_capacity_unfired
         )
+        cup_heat_delta = thermal_loads["cup"]["Heating"] - free_cup_heating
+        cup_heat_remaining = cup_heat_delta.clip(0, None)
+        cup_fired_hrsg_load = cup_heat_remaining.clip(0, cup_hrsg_capacity)
+        cup_boiler_load = cup_heat_remaining - cup_fired_hrsg_load
+        assert (cup_boiler_load < cup_boiler_capacity).all()
+        gas_boiler_demand = cup_boiler_load / cup_boiler_heat_cop
+        gas_fired_hrsg_demand = cup_fired_hrsg_load / cup_hrsg_heat_cop
+        total_gas_demand = (
+            gas_boiler_demand
+            + gas_fired_hrsg_demand
+            + gas_chiller_demand
+            + gas_cup_turbine_demand
+        )
+        total_cup_emissions_before_capture = (
+            total_gas_demand * cup_carbon_coeff_kgCO2eq_per_kWh_gas
+        )
+        logger.warning("Capture is not yet implemented!")
+        total_cup_emissions = total_cup_emissions_before_capture * 1
+        grid_data = self.generate_grid_data(ix=time_index)
+        logger.warning("Should we switch to full grid when carbon coeff is lower?")
         # Compute Grid Emissions/Cost
         # TODO: export discounts using surplus
         grid_cost_per_kWh = grid_data["energy_cost"] / 1000  # $/kWh
         grid_emissions_per_kWh = grid_data["emission_rate"] / 1000  # kg CO2eq/kWh
-        grid_cost = grid_cost_per_kWh * grid_elec_demand
-        grid_emissions = grid_emissions_per_kWh * grid_elec_demand
+        grid_emissions = grid_emissions_per_kWh * grid_elec_import
+        grid_cost = grid_cost_per_kWh * grid_elec_import
 
+        total_emissions = grid_emissions + total_cup_emissions
+        emissions_df = pd.concat(
+            [
+                total_emissions,
+                grid_emissions,
+                total_cup_emissions,
+            ],
+            axis=1,
+            keys=["Total", "Grid", "CUP"],
+        )
+        assert (emissions_df.index == time_index).all()
+        electricity_df = pd.concat(
+            [
+                elec_demand,
+                cup_elec_demand,
+                grid_elec_import,
+            ],
+            axis=1,
+            keys=["Final Demand", "CUP", "Grid"],
+        )
+        assert (electricity_df.index == time_index).all()
+        # TODO: include renewable utilization etc
+
+        results_df = pd.concat(
+            [
+                emissions_df,
+                # grid_data,
+                electricity_df,
+                clean_capacity.th,
+                clean_capacity.e,
+                original_thermal_loads["cup"],
+                original_thermal_loads["district"],
+                self.scheduled_loads.groupby("epw_year")
+                .sum()
+                .stack(level="DateTime", future_stack=True),
+            ],
+            axis=1,
+            keys=[
+                "Emissions",
+                # "Grid Factors",
+                "Electricity",
+                "Clean Thermal",
+                "Clean Electricity",
+                "CUP Thermal Demand",
+                "District Thermal Demand",
+                "Aggregate Building Profile",
+            ],
+        )
+        assert (results_df.index == time_index).all()
+        # TODO: should cup chiller have a max capacity
+        # TODO: how should we control the cup steam vs elec chiller balance?
+        # TODO: should cop's depend on weather conditions etc
+        # # TODO: decide between purchasing vs generating based off of cost to operate cup per kWh, emissions per kWh, and grid equivalents
+        # TODO: using energy storage etc
+        # Compute Grid Emissions/Cost
+        # TODO: export discounts using surplus
         # compute cup carbon
-        # TODO: check coeffs
         # TODO: carbon capture
-        cup_factor_mode = "b"
-        if cup_factor_mode == "a":
-            cup_gas_for_elec = cup_elec_demand / cup_elec_cop  # kWh gas burnt
-            cup_kg_CO2eq_due_to_elec = (
-                cup_elec_demand * cup_kg_CO2eq_per_kWh_elec
-            )  # kg CO2eq
-            cup_gas_coeff = cup_kg_CO2eq_due_to_elec / cup_gas_for_elec  # kg CO2eq/kWh
-            total_cup_gas = (
-                cup_elec_demand / cup_elec_cop + fuel_demands_from_conditioning["Gas"]
-            )  # kWh
-            cup_emissions = total_cup_gas * cup_gas_coeff
-        elif cup_factor_mode == "b":
-            cup_elec_emissions = cup_elec_demand * cup_kg_CO2eq_per_kWh_elec
-            cup_gas_emissions = (
-                fuel_demands_from_conditioning["Gas"] * cup_kg_CO2eq_per_kWh_gas
-            )
-            cup_emissions = cup_gas_emissions + cup_elec_emissions
         # TODO: cup costs
+        return results_df
 
-        total_emissions = grid_emissions + cup_emissions
-        print(total_emissions.groupby("epw_year").sum())
-
-        return total_emissions
-
-    def generate_grid_data(self, time_index: pd.Index, epw_years: pd.Series):
+    def generate_grid_data(self, ix: pd.Index):
+        logger.debug("Generating grid data...")
         # Grid emissions setup
         grid_data = pd.read_csv(
-            "data/iam/grid_data.csv", header=[0, 1, 2, 3, 4, 5], index_col=0
+            GRID_EMISSIONS_PATH, header=[0, 1, 2, 3, 4, 5], index_col=0
         )
         grid_data = grid_data.sort_index(axis=1).droplevel([0, 1, -1], axis=1)
-        grid_data.index = time_index
+
+        dt = pd.Series(
+            ix.get_level_values("DateTime").unique().sort_values(), name="DateTime"
+        )
+        grid_data.index = dt
         grid_data.columns.names = [
             lev if lev != "year" else "epw_year" for lev in (grid_data.columns.names)
         ]
         grid_data = grid_data.rename(
             columns={
-                "1": "bau",
-                "2": "cheap_ng",
-                "3": "decarbonization",
+                "1": GridScenarioType.bau.name,
+                "2": GridScenarioType.cheap_ng.name,
+                "3": GridScenarioType.decarbonization.name,
             }
         )  # TODO: replace with enums
         grid_data = grid_data.rename(
@@ -581,7 +651,10 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
 
         # populate intermediate years
         grid_data = grid_data.unstack(level="DateTime")
-        years = epw_years
+
+        years = pd.Series(
+            ix.get_level_values("epw_year").unique().sort_values(), name="epw_year"
+        )
         a: pd.DataFrame = grid_data.loc[years - years % 5]
         b: pd.DataFrame = grid_data.loc[
             ((years - years % 5 + 5)).clip(years.min(), years.max())
@@ -592,32 +665,256 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         b.index = years
         grid_data = a * alpha.values.reshape(-1, 1) + b * beta.values.reshape(-1, 1)
         grid_data = grid_data.stack(level="DateTime", future_stack=True)
+        logger.debug("Done generating grid data.")
         return grid_data
 
     def run(self):
+        np.random.seed(32)
         logger.info("----")
         logger.info(self.x)
         self.prep_artifacts()
         self.make_load_sequence()
-        self.run_plants()
+        final = self.run_plants()
         logger.info("----")
+        return final
+
+    def generate_district_phases(
+        self, bldg_ids, years_per_phase=3, duration_of_phase=4, base_year=2030
+    ):
+        logger.debug("Generating district phase assignments...")
+        df = pd.read_csv(DS_PHASED_SEQUENCE_PATH)
+        df = df[df.columns[:-2]]
+        df = df.rename(columns={"Building Number": "building_id"}).set_index(
+            "building_id"
+        )
+        phased_bldgs = df.index.get_level_values("building_id").unique()
+        bldg_loads_bldgs = bldg_ids
+        mask = bldg_loads_bldgs.str.upper().isin(phased_bldgs.str.upper())
+        missing_bldgs = (
+            bldg_loads_bldgs[~mask].get_level_values("building_id")
+        ).rename("building_id")
+        mask = phased_bldgs.str.upper().isin(bldg_loads_bldgs.str.upper())
+        non_simualted_bldgs = phased_bldgs[~mask].get_level_values("building_id")
+        df = df.drop(non_simualted_bldgs)
+        # choices = np.random.choice(df.Phase.unique(), size=len(missing_bldgs), replace=True)
+        choices = df.Phase.sample(n=len(missing_bldgs)).values
+        df = pd.concat([df, pd.DataFrame(index=missing_bldgs)])
+        df.loc[missing_bldgs, "CUP (Y/N)"] = "Y"
+        df.loc[missing_bldgs, "Phase"] = choices
+        df["CUP (Y/N)"] = (
+            df["CUP (Y/N)"].apply(lambda x: True if "Y" else False).astype(bool)
+        )
+
+        df["district_upgrade_year"] = base_year + (
+            (df.Phase * years_per_phase - years_per_phase)
+            + np.random.randint(0, duration_of_phase, len(df))
+        ).astype(int)
+        assert df.Phase.isna().sum() == 0
+        df = df.sort_index()
+        bldg_ids = sorted(list(bldg_ids))
+        df.index = pd.Index(bldg_ids, name="building_id")
+        logger.debug("Done generating district phase assignments.")
+        return df
+
+    def generate_deep_geothermal_capacity(self, ix: pd.Index):
+        zero_f = 0 if self.x.deepgeo == ScenarioType.baseline else 1
+        logger.warning("DEEP GEOTHERMAL THERMAAL CAPACITY NEEDS FINALIZING")
+        # TODO: add capacity factors.
+        deep_geothermal_thermal_capacity = (
+            50000 if self.x.deepgeo == ScenarioType.partial else 0
+        )
+        deep_geothermal_e_capacity = 50000 if self.x.deepgeo == ScenarioType.full else 0
+        dgt_start_year = 2040
+        available = ix.get_level_values("epw_year") >= dgt_start_year
+        dgt_heat = pd.Series(
+            index=ix,
+            data=0,
+            name="th",
+        ).sort_index()
+        dgt_e = pd.Series(
+            index=ix,
+            data=0,
+            name="e",
+        ).sort_index()
+        dgt_heat.loc[available] = deep_geothermal_thermal_capacity
+        dgt_e.loc[available] = deep_geothermal_e_capacity
+        return pd.concat([dgt_heat, dgt_e], axis=1) * zero_f
+
+    def generate_pv_capacity(self, ix: pd.Index):
+        # TODO: generate pv
+        logger.warning("NO PV DATA AVAILABLE YET")
+        pv_supply = pd.Series(index=ix, data=0, name="pv")
+        return pv_supply
+
+    def generate_nuclear_capacity(self, ix: pd.Index):
+        zero_f = 0 if self.x.nuclear == ScenarioType.baseline else 1
+        # in partial scenario, we buy two units in 2030, come online in 2035
+        # in full scenario, we buy five units in 2030, come online in 2035
+        n_batteries = 2 if self.x.nuclear == ScenarioType.partial else 5
+        battery_capacity_kWhe = 5000
+        battery_capacity_kWhTh = 8000
+        years = ix.get_level_values("epw_year")
+        first_year = 2035
+        mask = years < first_year
+        nuclear_supply = pd.Series(index=ix, data=1, name="nuclear")
+        nuclear_supply[mask] = 0.0
+        f = (
+            [0, 60, 70, 80, 85, 90]
+            if self.x.nuclear == ScenarioType.partial
+            else [0, 60, 72.5, 85, 90, 90]
+        )
+
+        f = np.interp(np.linspace(0, 5, 26), np.arange(6), f) / 100
+        capacity_factors = pd.Series(
+            f,
+            index=pd.Index(range(2025, 2051, 1), name="epw_year"),
+        )
+        battery_capacities = []
+        for i in range(n_batteries):
+            thresh = np.random.uniform(0, 1, len(nuclear_supply))
+            comparator = capacity_factors.loc[
+                nuclear_supply.index.get_level_values("epw_year")
+            ]
+            comparator.index = nuclear_supply.index
+            battery_capacities.append(
+                nuclear_supply * (thresh < comparator).astype(int)
+            )
+        nuclear_supply = pd.concat(battery_capacities, axis=1, keys=range(n_batteries))
+        nuclear_supply = nuclear_supply.sum(axis=1).rename("nuclear_opcount")
+        nuclear_e = (nuclear_supply * battery_capacity_kWhe).rename("e")
+        nuclear_th = (nuclear_supply * battery_capacity_kWhTh).rename("th")
+        return pd.concat([nuclear_e, nuclear_th], axis=1) * zero_f
+
+    def generate_clean_capacity(self, ix: pd.Index):
+        logger.debug("Generating clean capacity...")
+        nuclear = self.generate_nuclear_capacity(ix)
+        pv = self.generate_pv_capacity(ix)
+        geothermal = self.generate_deep_geothermal_capacity(ix)
+        clean_e = pd.concat(
+            [nuclear.e, pv, geothermal.e], axis=1, keys=["nuclear", "pv", "deepgeo"]
+        )
+        clean_th = pd.concat(
+            [nuclear.th, geothermal.th], axis=1, keys=["nuclear", "deepgeo"]
+        )
+        clean = pd.concat([clean_th, clean_e], axis=1, keys=["th", "e"])
+        logger.debug("Done generating clean capacity.")
+
+        return clean
+
+    @property
+    def fname(self):
+        formatted_name = (
+            str(self.x)
+            .replace("\t", "")
+            .replace("\n", "_")
+            .replace("Scenario:", "")
+            .replace("=", ".")
+        )
+        fname = f"{formatted_name}.hdf"
+        return fname
+
+    @property
+    def local_output_path(self):
+        return Path(self.temp_dir.name) / self.fname
+
+
+TEST_SCENARIO = BaseScenario(
+    renorate="slow",
+    climate="rcp45",
+    grid="bau",
+    retrofit="baseline",
+    schedules="baseline",
+    lab="baseline",
+    district="baseline",
+    nuclear="full",
+    deepgeo="full",
+    ess="baseline",
+    ccs="baseline",
+)
 
 
 if __name__ == "__main__":
-    # scenarios_df = BaseScenario.make_df()
-    # base_ix = 0
-    # profiles_path = "sdl-epengine/dev/dde9a86e/results"
+    import argparse
+    import shutil
+    import tempfile
 
-    # with tempfile.TemporaryDirectory() as artifacts_dir:
+    batch = "cc9e9cff-64f0-4fbf-b17a-2f829837f896"
+    batch = "fd346eec-ef8b-4a06-a006-5a219c9246c4"
 
-    #     base_scenario: BaseScenario = scenarios_df.iloc[base_ix].Scenario
-    #     s = Scenario(
-    #         artifacts_dir=artifacts_dir,
-    #         profiles_path=profiles_path,
-    #         x=base_scenario,
-    #     )
-    #     s.prep_artifacts()
+    scenarios_df = BaseScenario.make_df()
+    array_job_ix = os.getenv("AWS_BATCH_JOB_ARRAY_INDEX", None)
 
-    # assert not s.artifacts_dir.exists()
-    # s.source_df
-    pass
+    base_ix = int(array_job_ix) if array_job_ix is not None else None
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stride", type=int, default=0)
+    parser.add_argument("--batch_id", type=str, default=batch)
+    parser.add_argument("--use_test_scenario", type=bool, default=False)
+    args = parser.parse_args()
+    stride = args.stride
+    batch_id = args.batch_id
+    use_test_scenario = args.use_test_scenario
+    profiles_path = f"sdl-epengine/dev/{batch_id[:8]}/results"
+    run_name = "test"
+    results_path = f"mit-campus-decarbonization/results/{run_name}/{batch_id[:8]}"
+    if array_job_ix is None:
+        logger.info("Running locally!")
+    else:
+        logger.info(f"Running on AWS Batch: JOBIX: {array_job_ix}")
+    k = base_ix if base_ix is not None else 0
+    cleaned_dfs = []
+    with tempfile.TemporaryDirectory() as artifacts_dir:
+        while k < len(scenarios_df):
+            try:
+                base_scenario = (
+                    scenarios_df.iloc[k].Scenario
+                    if not use_test_scenario
+                    else TEST_SCENARIO
+                )
+                s = Scenario(
+                    artifacts_dir=artifacts_dir,
+                    profiles_path=profiles_path,
+                    x=base_scenario,
+                )
+                output_path = s.local_output_path
+                tl: pd.DataFrame = s.run()
+                output_path = s.local_output_path
+                annual_tl = tl.groupby("epw_year").sum()
+                annual_tl.to_hdf(output_path, key="tl", mode="w")
+                bucket_key = f"{results_path}/scenarios/{s.fname}"
+                aws.s3_client.upload_file(
+                    Filename=output_path.as_posix(),
+                    Bucket=aws.bucket.get_secret_value(),
+                    Key=bucket_key,
+                )
+
+                ix = base_scenario.to_index().repeat(len(annual_tl))
+                annual_tl: pd.DataFrame = annual_tl.Emissions.rename(
+                    columns={"Total": "Emissions"}
+                )[["Emissions"]]
+                annual_tl = annual_tl.set_index(ix, append=True)
+                logger.warning("TODO: COST")
+                annual_tl["Cost"] = annual_tl.Emissions * 0.0002
+                logger.warning("TODO: RISK and INNOVATION")
+                annual_tl["Risk"] = 10
+                annual_tl["Innovation"] = 15
+                cleaned_dfs.append(annual_tl)
+                s.temp_dir.cleanup()
+            except Exception as e:
+                logger.error(
+                    f"The following scenario failed! {base_scenario}", exc_info=e
+                )
+            if stride == 0:
+                break
+            k += stride
+        logger.info("Concatenating results...")
+        df = pd.concat(cleaned_dfs)
+        local_output_path = Path(artifacts_dir) / "scenarios.hdf"
+        df.to_hdf(local_output_path, key="tl", mode="w")
+        logger.info("Uploading results...")
+        aws.s3_client.upload_file(
+            Filename=local_output_path.as_posix(),
+            Bucket=aws.bucket.get_secret_value(),
+            Key=f"{results_path}/WORKER-{base_ix}.hdf",
+        )
+        logger.info("done!")
