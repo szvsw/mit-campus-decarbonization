@@ -1,3 +1,4 @@
+import gc
 import logging
 import os
 import re
@@ -220,7 +221,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         if path.name in HDF_CACHE:
             return HDF_CACHE[path.name]
         df = pd.read_hdf(path)
-        HDF_CACHE[path.name] = df
+        if aws.env != "prod":
+            HDF_CACHE[path.name] = df
         return df
 
     def bldg_loads(self, year: int, start_year=2025, final_year=2050):
@@ -345,6 +347,14 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             raise NotImplementedError("Partial schedules not supported yet")
 
         assert (assignments.index == self.scheduled_loads.index).all()
+        if aws.env == "prod":
+            del self.source_df, self.target_df
+            gc.collect()
+        aggregate_building_profile = (
+            self.scheduled_loads.groupby("epw_year")
+            .sum()
+            .stack(level="DateTime", future_stack=True)
+        )
         df = self.scheduled_loads.set_index(assignments, append=True)
         electricity_loads: pd.Series = (
             self.scheduled_loads["Electricity"]
@@ -363,6 +373,9 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             .groupby(["epw_year", "thermal_assignment"])
             .sum()
         )
+        if aws.env == "prod":
+            del df, self.scheduled_loads
+            gc.collect()
         full_ix = pd.MultiIndex.from_product(
             [
                 thermal_loads.index.get_level_values("epw_year").unique(),
@@ -459,11 +472,10 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         steam_enthalpy_200psi_mmBtu_per_kip = (
             steam_enthalpy_200psi_Btu_per_lb * 1000 / 1e6
         )
-        cup_elec_capacity = 40000
         cup_boiler_capacity_kps_per_hr = 80 * 2 + 100 + 60 + 100
-        cup_hrsg_capacity_kps_per_hr_unfired = 80
-        cup_hrsg_capacity_kps_per_hr = 180  # fired
-        cup_boiler_capcity_mmBtu_per_hr = (
+        cup_hrsg_capacity_kps_per_hr_unfired = 80 * 2
+        cup_hrsg_capacity_kps_per_hr = 180 * 2  # fired
+        cup_boiler_capacity_mmBtu_per_hr = (
             cup_boiler_capacity_kps_per_hr * steam_enthalpy_200psi_mmBtu_per_kip
         )
         cup_hrsg_capacity_mmBtu_per_hr_unfired = (
@@ -472,11 +484,13 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         cup_hrsg_capacity_mmBtu_per_hr = (
             cup_hrsg_capacity_kps_per_hr * steam_enthalpy_200psi_mmBtu_per_kip
         )
-        cup_boiler_capacity = cup_boiler_capcity_mmBtu_per_hr * MWh_per_mmBtu * 1000
+        cup_boiler_capacity = cup_boiler_capacity_mmBtu_per_hr * MWh_per_mmBtu * 1000
         cup_hrsg_capacity_unfired = (
             cup_hrsg_capacity_mmBtu_per_hr_unfired * MWh_per_mmBtu * 1000
         )
         cup_hrsg_capacity = cup_hrsg_capacity_mmBtu_per_hr * MWh_per_mmBtu * 1000
+
+        cup_elec_capacity = 36000
         cup_turbine_elec_cop = 0.29
         cup_turbine_heat_cop = 0.39
         cup_hrsg_heat_cop = 0.39
@@ -484,7 +498,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         logger.warning("CHANGE CHILLER COPs")
         cup_elec_chiller_cop = 3.5
         cup_gas_chiller_cop = 1.8  # https://www.johnsoncontrols.co.th/-/media/jci/be/united-states/hvac-equipment/chillers/files/be_yst_res_steam-turbine-chillers.pdf?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301
-        chiller_balance = 0.4  # 0 = elec chiller, 1 = steam driven chiller
+        chiller_balance = 0.5  # 0 = elec chiller, 1 = steam driven chiller
+        grid_balance = 0.1  # percentage of base elec load to satisfy by grid.
         ds_heat_cop = 3.5 if self.x.district == ScenarioType.partial else 3.3
         ds_cool_cop = 3.5 if self.x.district == ScenarioType.partial else 3.3
         cup_carbon_coeff_kgCO2eq_per_kWh_gas = 0.181  # standard
@@ -519,8 +534,10 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         surplus_clean = elec_demand_delta.clip(None, 0).abs()
         logger.warning("NOT USING SURPLUS CLEAN")
         unmet_elec_demand = elec_demand_delta.clip(0, None)
+        base_grid_demand = unmet_elec_demand * grid_balance
+        unmet_elec_demand = unmet_elec_demand - base_grid_demand
         cup_elec_demand = unmet_elec_demand.clip(0, cup_elec_capacity)
-        grid_elec_import = unmet_elec_demand - cup_elec_demand
+        grid_elec_import = unmet_elec_demand - cup_elec_demand + base_grid_demand
         gas_cup_turbine_demand = cup_elec_demand / cup_turbine_elec_cop
         free_cup_heating = (gas_cup_turbine_demand * cup_turbine_heat_cop).clip(
             0, cup_hrsg_capacity_unfired
@@ -575,6 +592,18 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         assert (electricity_df.index == time_index).all()
         # TODO: include renewable utilization etc
 
+        cup_equipment_loads = pd.concat(
+            [
+                free_cup_heating.rename("free_heating"),
+                cup_boiler_load.rename("boiler"),
+                cup_fired_hrsg_load.rename("fired_hrsg"),
+                elec_chiller_load.rename("elec_chiller"),
+                gas_chiller_load.rename("gas_chiller"),
+            ],
+            axis=1,
+            # keys=["Free Heating", "Boiler", "Fired HRGS", "Elec Chiller", "Gas Chiller"],
+        )
+
         results_df = pd.concat(
             [
                 emissions_df,
@@ -584,9 +613,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
                 clean_capacity.e,
                 original_thermal_loads["cup"],
                 original_thermal_loads["district"],
-                self.scheduled_loads.groupby("epw_year")
-                .sum()
-                .stack(level="DateTime", future_stack=True),
+                cup_equipment_loads,
+                aggregate_building_profile,
             ],
             axis=1,
             keys=[
@@ -595,8 +623,9 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
                 "Electricity",
                 "Clean Thermal",
                 "Clean Electricity",
-                "CUP Thermal Demand",
-                "District Thermal Demand",
+                "CUP Thermal Assignment",
+                "District Thermal Assignment",
+                "CUP Thermal Utilization",
                 "Aggregate Building Profile",
             ],
         )
@@ -842,6 +871,15 @@ if __name__ == "__main__":
     batch = "fd346eec-ef8b-4a06-a006-5a219c9246c4"
 
     scenarios_df = BaseScenario.make_df()
+    mask = (
+        (scenarios_df.index.get_level_values("ess") == ScenarioType.baseline.name)
+        & (scenarios_df.index.get_level_values("ccs") == ScenarioType.baseline.name)
+        & (
+            scenarios_df.index.get_level_values("schedules")
+            != ScenarioType.partial.name
+        )
+    )
+    scenarios_df = scenarios_df[mask]
     array_job_ix = os.getenv("AWS_BATCH_JOB_ARRAY_INDEX", None)
 
     base_ix = int(array_job_ix) if array_job_ix is not None else None
@@ -850,21 +888,26 @@ if __name__ == "__main__":
     parser.add_argument("--stride", type=int, default=0)
     parser.add_argument("--batch_id", type=str, default=batch)
     parser.add_argument("--use_test_scenario", type=bool, default=False)
+    parser.add_argument("--run_name", type=str, default="test")
+    parser.add_argument("--offset", type=int, default=0)
     args = parser.parse_args()
     stride = args.stride
     batch_id = args.batch_id
     use_test_scenario = args.use_test_scenario
+    run_name = args.run_name
+    offset = args.offset
     profiles_path = f"sdl-epengine/dev/{batch_id[:8]}/results"
-    run_name = "test"
     results_path = f"mit-campus-decarbonization/results/{run_name}/{batch_id[:8]}"
     if array_job_ix is None:
         logger.info("Running locally!")
     else:
         logger.info(f"Running on AWS Batch: JOBIX: {array_job_ix}")
     k = base_ix if base_ix is not None else 0
+    k = k + offset
     cleaned_dfs = []
     with tempfile.TemporaryDirectory() as artifacts_dir:
         while k < len(scenarios_df):
+            logger.info(f"-------ROW:{k}-------")
             try:
                 base_scenario = (
                     scenarios_df.iloc[k].Scenario
@@ -898,8 +941,21 @@ if __name__ == "__main__":
                 logger.warning("TODO: RISK and INNOVATION")
                 annual_tl["Risk"] = 10
                 annual_tl["Innovation"] = 15
+                # add a level to the multi index with all velues set to k
+                anuual_tl = annual_tl.set_index(
+                    pd.Index(
+                        [k] * len(annual_tl),
+                        name="scenario_id",
+                    ),
+                    append=True,
+                )
+
                 cleaned_dfs.append(annual_tl)
                 s.temp_dir.cleanup()
+                if aws.env == "prod":
+                    del annual_tl, ix, s, tl
+                    gc.collect()
+
             except Exception as e:
                 logger.error(
                     f"The following scenario failed! {base_scenario}", exc_info=e
@@ -915,6 +971,6 @@ if __name__ == "__main__":
         aws.s3_client.upload_file(
             Filename=local_output_path.as_posix(),
             Bucket=aws.bucket.get_secret_value(),
-            Key=f"{results_path}/WORKER-{base_ix}.hdf",
+            Key=f"{results_path}/WORKER-{(base_ix+offset):04d}.hdf",
         )
         logger.info("done!")

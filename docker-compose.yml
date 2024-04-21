@@ -12,5 +12,6 @@ services:
     build: 
       context: .
       dockerfile: lib/worker/Dockerfile
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/mit-campus-decarbonization-worker:latest
     env_file:
       - .env

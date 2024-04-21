@@ -7,14 +7,14 @@ from pydantic_settings import BaseSettings
 
 
 class SupaSettings(BaseSettings):
-    url: str = Field(..., env="URL")
-    service_role_key: str = Field(..., env="SERVICE_ROLE_KEY")
-    anon_key: Optional[str] = Field(..., env="ANON_KEY")
-    host: Optional[str] = Field(..., env="HOST")
-    port: Optional[int] = Field(..., env="PORT")
-    user: Optional[str] = Field(..., env="USER")
-    database: Optional[str] = Field(..., env="DATABASE")
-    password: Optional[str] = Field(..., env="PASSWORD")
+    url: str = Field("https://127.0.0.1:54321", env="URL")
+    service_role_key: str = Field("123456", env="SERVICE_ROLE_KEY")
+    anon_key: Optional[str] = Field("123456", env="ANON_KEY")
+    host: Optional[str] = Field("127.0.0.1", env="HOST")
+    port: Optional[int] = Field(54322, env="PORT")
+    user: Optional[str] = Field("postgres", env="USER")
+    database: Optional[str] = Field("postgres", env="DATABASE")
+    password: Optional[str] = Field("postgres", env="PASSWORD")
     echo: Optional[bool] = Field(False, env="ECHO")
 
     @computed_field
@@ -28,12 +28,13 @@ class SupaSettings(BaseSettings):
 
 
 class AwsSettings(BaseSettings):
-    access_key_id: SecretStr = Field(..., env="ACCESS_KEY_ID")
-    secret_access_key: SecretStr = Field(..., env="SECRET_ACCESS_KEY")
-    default_region: str = Field(..., env="DEFAULT_REGION")
-    region: str = Field(..., env="REGION")
-    account_id: SecretStr = Field(..., env="ACCOUNT_ID")
+    access_key_id: SecretStr = Field("foobar", env="ACCESS_KEY_ID")
+    secret_access_key: SecretStr = Field("foobar", env="SECRET_ACCESS_KEY")
+    default_region: str = Field("us-east-1", env="DEFAULT_REGION")
+    region: str = Field("us-east-1", env="REGION")
+    account_id: SecretStr = Field("foobar", env="ACCOUNT_ID")
     bucket: SecretStr = Field(..., env="BUCKET")
+    env: str = Field("dev", env="ENV")
 
     class Config:
         env_prefix = "AWS_"
@@ -41,16 +42,20 @@ class AwsSettings(BaseSettings):
 
     @cached_property
     def s3_client(self):
-        return boto3.client(
-            "s3",
-            aws_access_key_id=self.access_key_id.get_secret_value(),
-            aws_secret_access_key=self.secret_access_key.get_secret_value(),
-            region_name=self.region,
+        return (
+            boto3.client(
+                "s3",
+                aws_access_key_id=self.access_key_id.get_secret_value(),
+                aws_secret_access_key=self.secret_access_key.get_secret_value(),
+                region_name=self.region,
+            )
+            if self.env != "prod"
+            else boto3.client("s3")
         )
 
 
 class ConfigSettings(BaseSettings):
-    log_level: str = Field(..., env="LOG_LEVEL")
+    log_level: str = Field("DEBUG", env="LOG_LEVEL")
     data_dir: DirectoryPath = Field("data", env="DATA_DIR")
 
     class Config:
