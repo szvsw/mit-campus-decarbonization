@@ -115,6 +115,9 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         default_factory=tempfile.TemporaryDirectory,
         description="Where to write artifacts for this scenario.",
     )
+    results_path: str = Field(
+        ..., description="The folder in the bucket where the results are stored."
+    )
     profiles_path: str = Field(
         ..., description="The folder in the bucket where the buildings are stored."
     )
@@ -833,8 +836,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         peak_kWsqm = peak_Wsqm / 1000
         polygon_kW_peaks = polygon_areas * peak_kWsqm
         building_kW_peaks = building_areas * peak_kWsqm
-        usable_polygons = polygon_kW_peaks > 100
-        usable_buildings = building_kW_peaks > 100
+        usable_polygons = polygon_kW_peaks >= 100
+        usable_buildings = building_kW_peaks >= 100
         usable_areas_by_polygon = polygon_areas[usable_polygons].sum()
         usable_areas_by_building = building_areas[usable_buildings].sum()
         total_area = polygon_areas.sum()
@@ -924,15 +927,60 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
 
         return clean
 
-    def run(self):
+    def generate_dfs_and_scheduled_loads(self, from_s3=False, to_s3=False):
         np.random.seed(32)
+        assert not (from_s3 and to_s3)
+        if from_s3:
+            logger.debug("Loading dfs from s3 cache...")
+            local_output_file = Path(self.artifacts_dir) / self.building_loads_fname
+            if os.path.exists(local_output_file):
+                logger.info(f"Already downloaded: {local_output_file}")
+            else:
+                logger.info(f"Downloading from s3: {local_output_file}")
+                aws.s3_client.download_file(
+                    Bucket=aws.bucket.get_secret_value(),
+                    Key=f"{self.results_path}/cached_dfs/{self.building_loads_fname}",
+                    Filename=local_output_file.as_posix(),
+                )
+            self.source_df = pd.read_hdf(local_output_file, key="source_df")
+            self.target_df = pd.read_hdf(local_output_file, key="target_df")
+            self.scheduled_loads = pd.read_hdf(local_output_file, key="scheduled_loads")
+            logger.info("Done downloading dfs from cache.")
+        else:
+            self.prep_artifacts()
+            self.make_load_sequence()
+
+        if to_s3:
+            logger.debug("Uploading dfs to cache...")
+            local_output_dir = Path(self.temp_dir.name) / self.building_loads_fname
+            self.source_df.to_hdf(local_output_dir, key="source_df", mode="w")
+            self.target_df.to_hdf(local_output_dir, key="target_df", mode="a")
+            self.scheduled_loads.to_hdf(
+                local_output_dir, key="scheduled_loads", mode="a"
+            )
+            # upload to s3
+            aws.s3_client.upload_file(
+                Filename=local_output_dir.as_posix(),
+                Bucket=aws.bucket.get_secret_value(),
+                Key=f"{self.results_path}/cached_dfs/{self.building_loads_fname}",
+            )
+            logger.info("Done uploading dfs to cache.")
+
+    def run(self, from_s3=False, to_s3=False):
         logger.info("----")
         logger.info(self.x)
-        self.prep_artifacts()
-        self.make_load_sequence()
+        self.generate_dfs_and_scheduled_loads(from_s3=from_s3, to_s3=to_s3)
+        if to_s3:
+            return None
+        np.random.seed(42)
         final = self.run_plants()
         logger.info("----")
         return final
+
+    @property
+    def building_loads_fname(self):
+        fname = f"CLIMATE.{self.x.climate.name}_RETRO.{self.x.retrofit.name}_SCHED.{self.x.schedules.name}_LAB.{self.x.lab.name}_RENORATE.{self.x.renorate.name}.hdf"
+        return fname
 
     @property
     def fname(self):
@@ -995,14 +1043,41 @@ if __name__ == "__main__":
     parser.add_argument("--use_test_scenario", type=bool, default=False)
     parser.add_argument("--run_name", type=str, default="test")
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--from_s3", type=bool, default=True)
+    parser.add_argument("--to_s3", type=bool, default=False)
     args = parser.parse_args()
     stride = args.stride
     batch_id = args.batch_id
     use_test_scenario = args.use_test_scenario
     run_name = args.run_name
     offset = args.offset
+    from_s3 = args.from_s3
+    to_s3 = args.to_s3
     profiles_path = f"sdl-epengine/dev/{batch_id[:8]}/results"
     results_path = f"mit-campus-decarbonization/results/{run_name}/{batch_id[:8]}"
+
+    if to_s3:
+        for key in BaseScenario.model_fields:
+            if key not in [
+                "renorate",
+                "climate",
+                "retrofit",
+                "schedules",
+                "lab",
+                "grid",
+            ]:
+                mask = (
+                    scenarios_df.index.get_level_values(key)
+                    == ScenarioType.baseline.name
+                )
+                scenarios_df = scenarios_df[mask]
+            if key == "grid":
+                mask = (
+                    scenarios_df.index.get_level_values(key)
+                    == GridScenarioType.bau.name
+                )
+                scenarios_df = scenarios_df[mask]
+
     if array_job_ix is None:
         logger.info("Running locally!")
     else:
@@ -1022,10 +1097,17 @@ if __name__ == "__main__":
                 s = Scenario(
                     artifacts_dir=artifacts_dir,
                     profiles_path=profiles_path,
+                    results_path=results_path,
                     x=base_scenario,
                 )
                 output_path = s.local_output_path
-                tl: pd.DataFrame = s.run()
+                tl: pd.DataFrame = s.run(to_s3=to_s3, from_s3=from_s3)
+                if to_s3:
+                    if stride == 0:
+                        break
+                    else:
+                        k += stride
+                        continue
                 output_path = s.local_output_path
                 annual_tl = tl.groupby("epw_year").sum()
                 annual_tl.to_hdf(output_path, key="tl", mode="w")
@@ -1068,14 +1150,18 @@ if __name__ == "__main__":
             if stride == 0:
                 break
             k += stride
+        if to_s3:
+            exit()
         logger.info("Concatenating results...")
         df = pd.concat(cleaned_dfs)
         local_output_path = Path(artifacts_dir) / "scenarios.hdf"
         df.to_hdf(local_output_path, key="tl", mode="w")
         logger.info("Uploading results...")
+        base_ix = base_ix if base_ix is not None else 0
+        offset = offset if offset is not None else 0
         aws.s3_client.upload_file(
             Filename=local_output_path.as_posix(),
             Bucket=aws.bucket.get_secret_value(),
-            Key=f"{results_path}/WORKER-{(base_ix+offset):04d}.hdf",
+            Key=f"{results_path}/WORKER-B{base_ix:04d}-O{offset:04d}-S{stride:04d}.hdf",
         )
         logger.info("done!")
