@@ -109,6 +109,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
     artifacts_dir: DirectoryPath = Field(
         ..., description="Where to download artifacts to."
     )
+    heat_factor: float = Field(1.0, description="The heat factor for the scenario.")
+    cool_factor: float = Field(1.0, description="The cool factor for the scenario.")
     x: BaseScenario = Field(..., description="The base scenario.")
 
     temp_dir: tempfile.TemporaryDirectory = Field(
@@ -150,10 +152,7 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
 
         # Constructing the regex pattern based on the class attributes
         source_pattern = f".*EPW.{self.x.climate.value}.*_RETRO.baseline_SCHED.baseline_LAB.baseline.hdf"
-        target_pattern = f".*EPW.{self.x.climate.value}.*_RETRO.{self.x.retrofit.value}_SCHED.{self.x.schedules.value if self.x.schedules != ScenarioType.partial else 'full'}_LAB.{self.x.lab.value}.hdf"
-        # TODO: we also need to grab the retrofit/baseline/lab scenario for when schedules is partial
-        if self.x.schedules == ScenarioType.partial:
-            raise NotImplementedError("Partial schedules not implemented yet.")
+        target_pattern = f".*EPW.{self.x.climate.value}.*_RETRO.{self.x.retrofit.value}_SCHED.{self.x.schedules.value}_LAB.{self.x.lab.value}.hdf"
         source_regex = re.compile(source_pattern)
         target_regex = re.compile(target_pattern)
 
@@ -201,6 +200,13 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         target = pd.concat(target_dfs).sort_index(level="sort_id")
         source["Electricity"] = source["Electricity"]
         target["Electricity"] = target["Electricity"]
+        source["Water"] = source["Water"] * self.heat_factor
+        target["Water"] = target["Water"] * self.heat_factor
+        source["Heating"] = source["Heating"] * self.heat_factor
+        target["Heating"] = target["Heating"] * self.heat_factor
+        source["Cooling"] = source["Cooling"] * self.cool_factor
+        target["Cooling"] = target["Cooling"] * self.cool_factor
+
         self.source_df = source
         self.target_df = target
         assert self.source_df.index.to_frame(index=False)[
@@ -236,6 +242,9 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         interp = phase / 10
         lower_year = max(start_year, year - phase)
         upper_year = min(final_year, year - phase + 10)
+        phase = year - lower_year
+        dur = upper_year - lower_year
+        interp = (year - lower_year) / max(dur, 1)
         results = []
         for segment, df in [("source", self.source_df), ("target", self.target_df)]:
             df: pd.DataFrame = df
@@ -282,10 +291,7 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             df.index.get_level_values("building_id"),
             f"retrofit_year_{self.x.renorate.name}",
         ].values
-        partial_actually_ugprades = self.reno_seq.loc[
-            df.index.get_level_values("building_id"), "sched_partial_flag"
-        ].values
-        is_upgraded = upgrade_year < df.index.get_level_values("epw_year")
+        is_upgraded = df.index.get_level_values("epw_year") >= upgrade_year
         use_row = (is_upgraded & (df.index.get_level_values("segment") == "target")) | (
             ~is_upgraded & (df.index.get_level_values("segment") == "source")
         )
@@ -312,7 +318,6 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             .index
         )
         clean_capacity = self.generate_clean_capacity(ix=time_index)
-        logger.warning("NO GRID ARBITRAGE SCENARIO")
 
         assignments = pd.Series(
             index=self.scheduled_loads.index,
@@ -335,18 +340,10 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         elif self.x.district == ScenarioType.full:
             # some buildings are ds according to phasing
             # some buildings are cup
-            logger.warning("District FULL scenario Not Different Enough!")
             assignments[is_switched] = "district"
 
-        logger.warning("ESS SCENARIOS NEEDS FINALIZING")
         if self.x.ess != ScenarioType.baseline:
             raise NotImplementedError("Only baseline ESS is supported")
-
-        logger.warning("DEEP GEOTHERMAL SCENARIOS NEEDS FINALIZING")
-
-        logger.warning("SCHEDULES PARTIAL needs finalizing")
-        if self.x.schedules == ScenarioType.partial:
-            raise NotImplementedError("Partial schedules not supported yet")
 
         assert (assignments.index == self.scheduled_loads.index).all()
         if aws.env == "prod":
@@ -365,7 +362,6 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             .stack(future_stack=True)
         )
 
-        logger.warning("VEHICLE LOADS NEEDED")
         vehicle_loads = pd.Series(
             index=electricity_loads.index, data=0, name="vehicle_loads"
         )
@@ -475,8 +471,9 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             steam_enthalpy_200psi_Btu_per_lb * 1000 / 1e6
         )
         cup_boiler_capacity_kps_per_hr = 80 * 2 + 100 + 60 + 100
-        cup_hrsg_capacity_kps_per_hr_unfired = 80 * 2
-        cup_hrsg_capacity_kps_per_hr = 180 * 2  # fired
+        logger.warning("Using derated hrsg capacities")
+        cup_hrsg_capacity_kps_per_hr_unfired = 75 * 2
+        cup_hrsg_capacity_kps_per_hr = 170 * 2  # fired
         cup_boiler_capacity_mmBtu_per_hr = (
             cup_boiler_capacity_kps_per_hr * steam_enthalpy_200psi_mmBtu_per_kip
         )
@@ -496,16 +493,17 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         cup_turbine_elec_cop = 0.29
         cup_turbine_heat_cop = 0.39
         # cup_hrsg_heat_cop = 0.39
-        cup_hrsg_heat_cop = 0.89
-        cup_boiler_heat_cop = 0.89
+        logger.warning("using derated firing and hrsg cop")
+        cup_hrsg_heat_cop = 0.8  # 0.89
+        cup_boiler_heat_cop = 0.8  # 0.89
         logger.warning("CHANGE CHILLER COPs?")
-        cup_elec_chiller_cop = 3.5
-        cup_gas_chiller_cop = 1.2  # https://www.johnsoncontrols.co.th/-/media/jci/be/united-states/hvac-equipment/chillers/files/be_yst_res_steam-turbine-chillers.pdf?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301
-        chiller_balance = 0.5  # 0 = elec chiller, 1 = steam driven chiller
+        cup_elec_chiller_cop = 3.0
+        cup_gas_chiller_cop = 1.1  # https://www.johnsoncontrols.co.th/-/media/jci/be/united-states/hvac-equipment/chillers/files/be_yst_res_steam-turbine-chillers.pdf?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301?la=th&hash=924082786A5C7C3CAE87E54D05841880556CA301
+        chiller_balance = 0.4  # 0 = elec chiller, 1 = steam driven chiller
         grid_balance = 0.1  # percentage of base elec load to satisfy by grid.
         ds_heat_cop = 3.5 if self.x.district == ScenarioType.partial else 3.3
         ds_cool_cop = 3.5 if self.x.district == ScenarioType.partial else 3.3
-        cup_carbon_coeff_kgCO2eq_per_kWh_gas = 0.181  # standard
+        cup_carbon_coeff_kgCO2eq_per_kWh_gas = 0.182  # standard
 
         # reduce thermal heating demands by deep geothermal if available
         # split buildings between cup and district if available according to phasing
@@ -535,7 +533,6 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
 
         elec_demand_delta = elec_demand - clean_electricity_capacity
         surplus_clean = elec_demand_delta.clip(None, 0).abs()
-        logger.warning("NOT USING SURPLUS CLEAN")
         unmet_elec_demand = elec_demand_delta.clip(0, None)
         base_grid_demand = unmet_elec_demand * grid_balance
         unmet_elec_demand = unmet_elec_demand - base_grid_demand
@@ -562,22 +559,20 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         total_cup_emissions_before_capture = (
             total_gas_demand * cup_carbon_coeff_kgCO2eq_per_kWh_gas
         )
-        logger.warning("Capture is not yet implemented!")
         capture_capacity = self.generate_carbon_capture_capacity(ix=time_index)
-        total_cup_emissions_delta = (
-            total_cup_emissions_before_capture - capture_capacity.pc
+        total_cup_emissions_delta = total_cup_emissions_before_capture * (
+            1 - capture_capacity.pc
         )
         total_cup_emissions = total_cup_emissions_delta.clip(0, None)
         total_capture = total_cup_emissions_before_capture - total_cup_emissions
         kWh_per_tonne_capture = 100
         kWh_per_kg_capture = kWh_per_tonne_capture / 1000
         elec_due_to_capture = total_capture * kWh_per_kg_capture
-        assert (
-            elec_due_to_capture.max()
-        ) < 2000, "Carbon capture is taking greater than 2 MW at a time step!"
+        # assert (
+        #     elec_due_to_capture.max()
+        # ) < 2000, "Carbon capture is taking greater than 2 MW at a time step!"
 
         grid_data = self.generate_grid_data(ix=time_index)
-        logger.warning("Should we switch to full grid when carbon coeff is lower?")
         # Compute Grid Emissions/Cost
         # TODO: export discounts using surplus
         grid_cost_per_kWh = grid_data["energy_cost"] / 1000  # $/kWh
@@ -721,7 +716,6 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
     def generate_district_phases(
         self, bldg_ids, years_per_phase=3, duration_of_phase=4, base_year=2030
     ):
-        logger.warning("NON-CUP BUILDINGS PLACED ON CUP ANYWAYS")
         logger.debug("Generating district phase assignments...")
         df = pd.read_csv(DS_PHASED_SEQUENCE_PATH)
         df = df[df.columns[:-2]]
@@ -759,9 +753,6 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
 
     def generate_deep_geothermal_capacity(self, ix: pd.Index):
         zero_f = 0 if self.x.deepgeo == ScenarioType.baseline else 1
-        logger.warning(
-            "DEEP GEOTHERMAL THERMAAL CAPACITY NEEDS FINALIZING, including FACTORs"
-        )
         # TODO: add capacity factors.
         deep_geothermal_thermal_capacity = (
             50000 if self.x.deepgeo == ScenarioType.partial else 0
@@ -784,19 +775,19 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         return pd.concat([dgt_heat, dgt_e], axis=1) * zero_f
 
     def generate_carbon_capture_capacity(self, ix: pd.Index):
-        logger.warning("CARBON CAPTURE AND STORAGE CAPACITY NEEDS FINALIZING")
-        post_combustion_annual_capacity_tonnes = 150000.0
         direct_air_capture_annual_capacity_tonnes = 4000.0
         biological_capture_annual_capacity_tonnes = 5000.0
-        post_combustion_capacity_hourly_kg = (
-            post_combustion_annual_capacity_tonnes / 8760 * 1000
-        )
+        # post_combustion_annual_capacity_tonnes = 150000
+        # post_combustion_capacity_hourly_kg = (
+        # post_combustion_annual_capacity_tonnes / 8760 * 1000
+        # )
         direct_air_capture_capacity_hourly_kg = (
             direct_air_capture_annual_capacity_tonnes / 8760 * 1000
         )
         biological_capture_capacity_hourly_kg = (
             biological_capture_annual_capacity_tonnes / 8760 * 1000
         )
+        post_combustion_capture_efficiency = 0.75
         pc_ccs_start_year = 2035
         dac_ccs_start_year = 2035
         pc_available = ix.get_level_values("epw_year") >= pc_ccs_start_year
@@ -818,7 +809,8 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         ).sort_index()
 
         if self.x.ccs != ScenarioType.baseline:
-            pc.loc[pc_available] = post_combustion_capacity_hourly_kg
+            # pc.loc[pc_available] = post_combustion_capacity_hourly_kg
+            pc.loc[pc_available] = post_combustion_capture_efficiency
         if self.x.ccs == ScenarioType.full:
             dac.loc[dac_available] = direct_air_capture_capacity_hourly_kg
         return pd.concat([pc, dac, bc], axis=1)
@@ -874,7 +866,7 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
         # in full scenario, we buy five units in 2030, come online in 2035
         n_batteries = 2 if self.x.nuclear == ScenarioType.partial else 5
         battery_capacity_kWhe = 5000
-        battery_capacity_kWhTh = 8000
+        battery_capacity_kWhTh = 8000 * 0.70 * 0.0  # TODO: recycling thermal energy?
         years = ix.get_level_values("epw_year")
         first_year = 2035
         mask = years < first_year
@@ -892,9 +884,6 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             index=pd.Index(range(2025, 2051, 1), name="epw_year"),
         )
         battery_capacities = []
-        logger.warning(
-            "NUCLEAR CAPACITY FACTOR: should implement longer outages rather than hourly"
-        )
         for i in range(n_batteries):
             thresh = np.random.uniform(0, 1, len(nuclear_supply))
             comparator = capacity_factors.loc[
@@ -967,8 +956,31 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
             logger.info("Done uploading dfs to cache.")
 
     def run(self, from_s3=False, to_s3=False):
-        logger.info("----")
         logger.info(self.x)
+        logger.info("----")
+        logger.warning("VEHICLE LOADS NEEDED")
+        logger.warning("NOT USING SURPLUS CLEAN")
+        logger.warning("NO GRID ARBITRAGE SCENARIO")
+        logger.warning("Should we switch to full grid when carbon coeff is lower?")
+        logger.warning(
+            "SOME BUILDINGS ARE UPGRADED IN 2025, RESULTING IN DIFF YEAR 0 EMISSIONS"
+        )
+        logger.warning("YEAR 0 VALUE IS NOT THE SAME FOR ALL PV SCENARIOS!")
+        logger.warning("NON-CUP BUILDINGS PLACED ON CUP")
+        logger.warning(
+            "District FULL scenario Not Different Enough/don't take advantage of good grid!"
+        )
+        logger.warning("ESS SCENARIOS NEEDS FINALIZING")
+        logger.warning("DEEP GEOTHERMAL SCENARIOS NEEDS FINALIZING")
+        logger.warning("NON-CUP BUILDINGS PLACED ON CUP ANYWAYS")
+        logger.warning(
+            "DEEP GEOTHERMAL THERMAAL CAPACITY NEEDS FINALIZING, including FACTORs"
+        )
+        logger.warning("CARBON CAPTURE AND STORAGE CAPACITY NEEDS FINALIZING")
+        logger.warning(
+            "NUCLEAR CAPACITY FACTOR: should implement longer outages rather than hourly"
+        )
+        logger.warning("NO NUCLEAR THERMAL CAPACITY")
         self.generate_dfs_and_scheduled_loads(from_s3=from_s3, to_s3=to_s3)
         if to_s3:
             return None
@@ -1000,7 +1012,7 @@ class Scenario(BaseModel, arbitrary_types_allowed=True):
 
 
 TEST_SCENARIO = BaseScenario(
-    renorate="slow",
+    renorate="fast",
     climate="rcp45",
     grid="bau",
     retrofit="baseline",
@@ -1020,18 +1032,10 @@ if __name__ == "__main__":
     import shutil
     import tempfile
 
-    batch = "cc9e9cff-64f0-4fbf-b17a-2f829837f896"
-    batch = "fd346eec-ef8b-4a06-a006-5a219c9246c4"
+    batch = "cd377425-14c7-444c-88d2-1bce0d94a738"
 
     scenarios_df = BaseScenario.make_df()
-    mask = (
-        (scenarios_df.index.get_level_values("ess") == ScenarioType.baseline.name)
-        & (scenarios_df.index.get_level_values("ccs") != ScenarioType.full.name)
-        & (
-            scenarios_df.index.get_level_values("schedules")
-            != ScenarioType.partial.name
-        )
-    )
+    mask = scenarios_df.index.get_level_values("ess") == ScenarioType.baseline.name
     scenarios_df = scenarios_df[mask]
     array_job_ix = os.getenv("AWS_BATCH_JOB_ARRAY_INDEX", None)
 
@@ -1043,8 +1047,10 @@ if __name__ == "__main__":
     parser.add_argument("--use_test_scenario", type=bool, default=False)
     parser.add_argument("--run_name", type=str, default="test")
     parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument("--from_s3", type=bool, default=True)
+    parser.add_argument("--from_s3", type=bool, default=False)
     parser.add_argument("--to_s3", type=bool, default=False)
+    parser.add_argument("--heat_factor", type=float, default=2.75)
+    parser.add_argument("--cool_factor", type=float, default=1.8)
     args = parser.parse_args()
     stride = args.stride
     batch_id = args.batch_id
@@ -1053,6 +1059,8 @@ if __name__ == "__main__":
     offset = args.offset
     from_s3 = args.from_s3
     to_s3 = args.to_s3
+    heat_factor = args.heat_factor
+    cool_factor = args.cool_factor
     profiles_path = f"sdl-epengine/dev/{batch_id[:8]}/results"
     results_path = f"mit-campus-decarbonization/results/{run_name}/{batch_id[:8]}"
 
@@ -1082,6 +1090,9 @@ if __name__ == "__main__":
         logger.info("Running locally!")
     else:
         logger.info(f"Running on AWS Batch: JOBIX: {array_job_ix}")
+    logger.info(
+        f"Stride: {stride}, Scenarios:{len(scenarios_df)}, estimated jobs: {max((len(scenarios_df)//max(stride,1))+1, 1)}"
+    )
     k = base_ix if base_ix is not None else 0
     k = k + offset
     cleaned_dfs = []
@@ -1099,6 +1110,8 @@ if __name__ == "__main__":
                     profiles_path=profiles_path,
                     results_path=results_path,
                     x=base_scenario,
+                    heat_factor=heat_factor,
+                    cool_factor=cool_factor,
                 )
                 output_path = s.local_output_path
                 tl: pd.DataFrame = s.run(to_s3=to_s3, from_s3=from_s3)
